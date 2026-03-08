@@ -132,6 +132,10 @@ class Database:
         # By default, we DO NOT force local anymore. We want Supabase first!
         
         self.database_url = os.getenv('DATABASE_URL')
+        # Ensure sslmode is set for Supabase
+        if self.database_url and 'sslmode' not in self.database_url:
+            separator = '&' if '?' in self.database_url else '?'
+            self.database_url = self.database_url + separator + 'sslmode=require'
         self.db_path = ""
         
         # Determine local DB path
