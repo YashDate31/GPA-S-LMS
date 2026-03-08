@@ -297,6 +297,55 @@ export default function Dashboard({ user }) {
            )}
         </div>
 
+        {/* 5. Recent Requests */}
+        <div>
+           <div className="flex items-center justify-between mb-5 px-1">
+             <h3 className="text-lg font-heading font-bold text-slate-800 dark:text-white flex items-center gap-2 transition-colors">
+                <RefreshCw className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                Recent Requests
+             </h3>
+             <Button variant="ghost" size="sm" className="text-indigo-600 hover:bg-indigo-50" onClick={() => navigate('/requests')}>
+               View All
+             </Button>
+           </div>
+           
+           {(!data.recent_requests || data.recent_requests.length === 0) ? (
+             <Card className="p-6 text-center text-slate-500 bg-white dark:bg-slate-900 border-none shadow-sm">
+               No recent requests.
+             </Card>
+           ) : (
+             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-800 overflow-hidden">
+               <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                 {data.recent_requests.slice(0, 3).map((req) => (
+                   <div key={req.req_id || req.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                     <div>
+                       <p className="font-semibold text-slate-800 dark:text-white capitalize">{req.request_type.replace('_', ' ')}</p>
+                       <p className="text-sm text-slate-500 dark:text-slate-400 truncate max-w-sm">
+                         {req.details && typeof req.details === 'string' && req.details.includes('{') 
+                           ? JSON.parse(req.details).title || JSON.parse(req.details).book_id || req.details 
+                           : req.details}
+                       </p>
+                     </div>
+                     <div className="flex items-center gap-3">
+                       <span className="text-xs text-slate-400 whitespace-nowrap">
+                         {new Date(req.created_at).toLocaleDateString()}
+                       </span>
+                       <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                         req.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                         req.status === 'rejected' ? 'bg-red-100 text-red-700' :
+                         req.status === 'cancelled' ? 'bg-slate-100 text-slate-700' :
+                         'bg-amber-100 text-amber-700'
+                       }`}>
+                         {req.status}
+                       </span>
+                     </div>
+                   </div>
+                 ))}
+               </div>
+             </div>
+           )}
+        </div>
+
       </div>
     </div>
   );

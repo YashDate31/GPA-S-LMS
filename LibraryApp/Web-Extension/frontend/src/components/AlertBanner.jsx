@@ -30,7 +30,7 @@ export default function AlertBanner() {
   if (!alert || !visible || isDashboard) return null;
 
   return (
-    <div className="bg-red-600 text-white px-4 py-3 shadow-md relative z-50 animate-slide-in">
+    <div className={`text-white px-4 py-3 shadow-md relative z-50 animate-slide-in ${alert.type === 'security' ? 'bg-amber-500' : 'bg-red-600'}`}>
       <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
         
         <div className="flex items-center gap-3">
@@ -38,9 +38,11 @@ export default function AlertBanner() {
             <AlertCircle size={20} className="text-white" />
           </div>
           <div className="font-medium text-sm md:text-base">
-            <span className="font-bold hidden sm:inline">Attention Needed: </span>
+            <span className="font-bold hidden sm:inline">
+              {alert.type === 'security' ? 'Action Recommended: ' : 'Attention Needed: '}
+            </span>
             {alert.type === 'security' ? (
-                <span>{alert.message}</span>
+                <span>Set your personal password to secure your account.</span>
             ) : (
                 <>
                     <span className="sm:hidden font-bold">{alert.count} Overdue Book{alert.count > 1 ? 's' : ''}</span>
@@ -60,7 +62,7 @@ export default function AlertBanner() {
           </Link>
           <button 
             onClick={() => setVisible(false)} 
-            className="text-white/70 hover:text-white p-1 hover:bg-red-700 rounded-md transition"
+            className={`text-white/70 hover:text-white p-1 rounded-md transition ${alert.type === 'security' ? 'hover:bg-amber-600' : 'hover:bg-red-700'}`}
           >
             <X size={18} />
           </button>

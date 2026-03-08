@@ -10,6 +10,7 @@ import Profile from './pages/Profile';
 import History from './pages/History';
 import MyBooks from './pages/MyBooks';
 import Services from './pages/Services';
+import Requests from './pages/Requests';
 import StudyMaterials from './pages/StudyMaterials';
 import Contact from './pages/Contact';
 import Layout from './components/Layout';
@@ -34,7 +35,7 @@ function AppRoutes({ user, setUser }) {
         <Route path="/history" element={user ? <History user={user} /> : <Navigate to="/login" replace />} />
         <Route path="/services" element={user ? <Services /> : <Navigate to="/login" replace />} />
         <Route path="/study-materials" element={user ? <StudyMaterials user={user} /> : <Navigate to="/login" replace />} />
-        <Route path="/requests" element={user ? <Services /> : <Navigate to="/login" replace />} />
+        <Route path="/requests" element={user ? <Requests user={user} /> : <Navigate to="/login" replace />} />
         <Route path="/profile" element={user ? <Profile user={user} /> : <Navigate to="/login" replace />} />
         <Route path="/settings" element={user ? <Settings user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
         <Route path="/contact" element={user ? <Contact /> : <Navigate to="/login" replace />} />
