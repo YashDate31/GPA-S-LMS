@@ -1,0 +1,51 @@
+# Virtual environments
+.venv/
+.venv-1/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+
+# Database files
+*.db
+
+# Generated documents
+*.docx
+*.xlsx
+
+# Logs and temp files
+*.log
+tempCodeRunnerFile.py
+sync_log.json
+email_history.json
+
+# Node modules
+node_modules/
+
+# Frontend build output (generated from source)
+LibraryApp/Web-Extension/frontend/dist/
+
+# Uploaded files
+LibraryApp/Web-Extension/uploads/registration_photos/*
+LibraryApp/Web-Extension/uploads/study_materials/*
+!LibraryApp/Web-Extension/uploads/registration_photos/.gitkeep
+!LibraryApp/Web-Extension/uploads/study_materials/.gitkeep
+
+# Settings with sensitive data
+LibraryApp/email_settings.json
+LibraryApp/library_settings.json
+LibraryApp/app_config.json
+
+# Secret keys
+*.secret_key
+.secret_key
