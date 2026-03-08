@@ -16,7 +16,12 @@ import subprocess
 from collections import defaultdict
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Try loading .env from multiple locations (repo root, parent, cwd)
+    _env_loaded = load_dotenv()  # cwd
+    if not _env_loaded:
+        _env_loaded = load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
+    if not _env_loaded:
+        _env_loaded = load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.env'))
 except ImportError:
     pass
 
@@ -184,6 +189,12 @@ def get_or_create_secret_key():
 app = Flask(__name__, static_folder='frontend/dist')
 app.secret_key = get_or_create_secret_key()
 
+# --- Startup diagnostics (visible in Render logs) ---
+print(f"[STARTUP] DATABASE_URL set: {bool(os.getenv('DATABASE_URL'))}")
+print(f"[STARTUP] POSTGRES_AVAILABLE (psycopg2 imported): {POSTGRES_AVAILABLE}")
+print(f"[STARTUP] BASE_DIR: {BASE_DIR}")
+print(f"[STARTUP] CWD: {os.getcwd()}")
+
 
 # --- Build / Version info (helps diagnose "server not updated") ---
 APP_START_TIME_UTC = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
@@ -228,6 +239,10 @@ def api_version():
         'app_version': APP_VERSION,
         'app_start_time_utc': APP_START_TIME_UTC,
         'pid': os.getpid(),
+        'database_url_set': bool(os.getenv('DATABASE_URL')),
+        'postgres_available': POSTGRES_AVAILABLE,
+        'pool_initialized': _portal_pg_pool is not None,
+        'pool_failed': _portal_pool_failed,
     }
 
     try:
