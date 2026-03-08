@@ -2378,6 +2378,50 @@ def api_submit_request():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/requests', methods=['GET'])
+def api_get_requests():
+    if 'student_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    conn = get_portal_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM requests WHERE enrollment_no = ? ORDER BY created_at DESC", (session['student_id'],))
+    requests = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({'requests': requests})
+
+@app.route('/api/request/<int:req_id>/cancel', methods=['POST'])
+def api_cancel_request(req_id):
+    if 'student_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    conn = get_portal_db()
+    cursor = conn.cursor()
+    
+    # Verify ownership and status
+    pk = _requests_pk_column(conn)
+    cursor.execute(f"SELECT status FROM requests WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
+    req = cursor.fetchone()
+    
+    if not req:
+        conn.close()
+        return jsonify({'error': 'Request not found'}), 404
+        
+    if req['status'] != 'pending':
+        conn.close()
+        return jsonify({'error': f'Cannot cancel request in {req["status"]} state'}), 400
+        
+    # Cancel request
+    try:
+        cursor.execute(f"UPDATE requests SET status = 'cancelled' WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': 'Request cancelled successfully'})
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/books')
 def api_books():
     # Read-Only Catalogue
