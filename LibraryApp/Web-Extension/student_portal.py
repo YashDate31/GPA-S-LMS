@@ -669,6 +669,20 @@ def get_db_connection(local_db_name):
         separator = '&' if '?' in database_url else '?'
         database_url = database_url + separator + 'sslmode=require'
     
+    # Force IPv4 to avoid IPv6 timeout issues with Supabase
+    if database_url:
+        try:
+            import socket
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(database_url)
+            hostname = parsed.hostname
+            if hostname and not hostname.replace('.', '').isdigit():
+                ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+                new_netloc = parsed.netloc.replace(hostname, ipv4)
+                database_url = urlunparse(parsed._replace(netloc=new_netloc))
+        except Exception:
+            pass  # Use original URL if resolution fails
+    
     # Check if we're in a cooldown period after a cloud failure
     cloud_in_cooldown = (time.time() - _portal_cloud_fail_time) < _PORTAL_CLOUD_RETRY_COOLDOWN if _portal_cloud_fail_time else False
     

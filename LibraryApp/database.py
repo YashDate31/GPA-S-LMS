@@ -128,6 +128,29 @@ class PostgresConnectionWrapper:
 
 
 class Database:
+    @staticmethod
+    def _force_ipv4_url(url):
+        """Resolve hostname to IPv4 to avoid IPv6 timeout issues with Supabase."""
+        try:
+            import socket
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            if hostname and not hostname.replace('.', '').isdigit():
+                # Resolve to IPv4 only
+                ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+                # Replace hostname with IPv4 in the URL, preserve port
+                if parsed.port:
+                    new_netloc = parsed.netloc.replace(hostname, ipv4)
+                else:
+                    new_netloc = parsed.netloc.replace(hostname, ipv4)
+                new_url = urlunparse(parsed._replace(netloc=new_netloc))
+                print(f"[OK] Database: Resolved {hostname} -> {ipv4} (IPv4)")
+                return new_url
+        except Exception as e:
+            print(f"[WARNING] Database: IPv4 resolution failed ({e}), using original URL")
+        return url
+
     def __init__(self, force_local=False):
         # By default, we DO NOT force local anymore. We want Supabase first!
         
@@ -136,6 +159,11 @@ class Database:
         if self.database_url and 'sslmode' not in self.database_url:
             separator = '&' if '?' in self.database_url else '?'
             self.database_url = self.database_url + separator + 'sslmode=require'
+        
+        # Force IPv4 to avoid IPv6 timeout issues with Supabase
+        if self.database_url:
+            self.database_url = self._force_ipv4_url(self.database_url)
+        
         self.db_path = ""
         
         # Determine local DB path
@@ -198,8 +226,12 @@ class Database:
                 conn = psycopg2.connect(self.database_url, connect_timeout=5)
                 return PostgresConnectionWrapper(conn)
             except Exception as e:
-                print(f"Cloud DB Connection Failed: {e}.")
-                raise e
+                print(f"Cloud DB Connection Failed: {e}. Falling back to local SQLite.")
+                # Fall back to local SQLite silently
+                conn = sqlite3.connect(self.db_path)
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA foreign_keys = ON')
+                return conn
         else:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
