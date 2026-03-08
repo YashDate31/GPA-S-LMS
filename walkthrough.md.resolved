@@ -1,0 +1,37 @@
+# Supabase Setup Walkthrough — GPA-S-LMS
+
+## What Was Done
+
+Applied **3 migrations** to the Supabase project **GPA-S-LMS** (`pistwngkqbfjgjtwmgee`, region: `ap-northeast-2`):
+
+| Migration | Tables Created | Details |
+|---|---|---|
+| `create_core_library_tables` | 6 | [students](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#856-871), [books](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#884-898), `borrow_records`, [transactions](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/main.py#980-987), [promotion_history](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#1081-1096), [academic_years](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#1211-1222) + 5 performance indexes |
+| `create_portal_tables` | 10 | [requests](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/Web-Extension/student_portal.py#95-119), `student_auth`, [notices](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/main.py#11752-11804), [deletion_requests](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/main.py#14500-14550), `user_settings`, `user_notifications`, `book_waitlist`, `access_logs`, [study_materials](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/Web-Extension/student_portal.py#3287-3314), `book_ratings` |
+| `disable_rls_for_direct_psycopg2_access` | — | Disabled RLS on all 16 tables |
+
+> [!IMPORTANT]
+> RLS was disabled because the app connects via **direct `psycopg2`** (not the Supabase JS SDK). RLS with no policies would block all queries.
+
+## Verification
+
+- ✅ All **16 tables** confirmed present with correct columns, data types, defaults, primary keys, foreign keys, and unique constraints.
+- ✅ All **5 indexes** on `borrow_records` and [books](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#884-898) created for dashboard query performance.
+- ✅ Foreign key relationships verified: `borrow_records` → [students](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#856-871)/[books](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#884-898), [transactions](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/main.py#980-987) → [students](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#856-871)/[books](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#884-898), [promotion_history](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#1081-1096) → [students](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#856-871), [deletion_requests](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/main.py#14500-14550) → [students](file:///c:/Users/Yash/OneDrive/Desktop/GPA-S-LMS/LibraryApp/database.py#856-871).
+
+## Next Steps for Render Deployment
+
+Set these **Environment Variables** in your Render Web Service settings:
+
+| Key | Value |
+|---|---|
+| `DATABASE_URL` | *(Copy from Supabase → Project Settings → Database → Connection String → URI)* |
+| `PORTAL_USE_CLOUD` | `1` |
+| `FLASK_SECRET_KEY` | *(Any random long string)* |
+
+Then update the **Start Command** to:
+```
+cd LibraryApp/Web-Extension && gunicorn student_portal:app
+```
+
+Redeploy and the portal will connect to this Supabase database automatically.
