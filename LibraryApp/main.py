@@ -3194,12 +3194,7 @@ Government Polytechnic Awasari (Kh)"""
                 br.enrollment_no, s.name, COALESCE(s.department, '') as branch,
                 br.book_id, b.title,
                 br.borrow_date, br.due_date, br.return_date,
-                CASE 
-                    WHEN br.return_date IS NOT NULL THEN 'Returned'
-                    WHEN CURRENT_DATE > br.due_date THEN 'Overdue'
-                    ELSE 'Active'
-                END as status,
-                COALESCE(br.fine, 0) as fine
+                br.status
                 FROM borrow_records br
                 LEFT JOIN students s ON br.enrollment_no = s.enrollment_no
                 LEFT JOIN books b ON br.book_id = b.book_id
@@ -3232,7 +3227,50 @@ Government Polytechnic Awasari (Kh)"""
             rows = c.fetchall()
             conn.close()
             
-            return [list(row) for row in rows]
+            # Calculate fines dynamically (same logic as get_all_records)
+            from datetime import datetime as _dt
+            today = _dt.now().date()
+            fine_per_day = self.get_fine_per_day()
+            result = []
+            for row in rows:
+                row = list(row)
+                enroll, name, branch, book_id, title, borrow_date, due_date, return_date_raw, status = row[:9]
+                
+                # Determine display status
+                if return_date_raw is not None:
+                    display_status = 'Returned'
+                else:
+                    try:
+                        due_d = _dt.strptime(str(due_date), '%Y-%m-%d').date()
+                        display_status = 'Overdue' if today > due_d else 'Active'
+                    except Exception:
+                        display_status = 'Active'
+                
+                # Calculate fine
+                fine = 0
+                try:
+                    due_d = _dt.strptime(str(due_date), '%Y-%m-%d').date()
+                    if status == 'borrowed' and return_date_raw is None:
+                        if today > due_d:
+                            fine = (today - due_d).days * fine_per_day
+                    elif return_date_raw is not None:
+                        if hasattr(return_date_raw, 'year'):
+                            ret_d = return_date_raw
+                            if isinstance(ret_d, datetime):
+                                ret_d = ret_d.date()
+                        else:
+                            ret_d = _dt.strptime(str(return_date_raw), '%Y-%m-%d').date()
+                        if ret_d > due_d:
+                            fine = (ret_d - due_d).days * fine_per_day
+                except Exception:
+                    pass
+                
+                # Format return date for display
+                return_display = str(return_date_raw) if return_date_raw is not None else 'None'
+                
+                result.append([enroll, name, branch, book_id, title, borrow_date, due_date, return_display, display_status, fine])
+            
+            return result
         except Exception as e:
             print(f"Error getting transactions report data: {e}")
             return []
@@ -3243,20 +3281,16 @@ Government Polytechnic Awasari (Kh)"""
             conn = self.db.get_connection()
             c = conn.cursor()
             
-            # PostgreSQL uses CURRENT_DATE instead of date('now')
-            # And uses DATE - DATE for day difference instead of julianday
             query = """SELECT 
                 br.enrollment_no, s.name, COALESCE(s.department, '') as branch,
                 s.phone, br.book_id, b.title,
-                br.borrow_date, br.due_date,
-                CAST(CURRENT_DATE - br.due_date AS INTEGER) as days_overdue,
-                CAST(CURRENT_DATE - br.due_date AS INTEGER) * ? as fine
+                br.borrow_date, br.due_date
                 FROM borrow_records br
                 LEFT JOIN students s ON br.enrollment_no = s.enrollment_no
                 LEFT JOIN books b ON br.book_id = b.book_id
-                WHERE br.return_date IS NULL AND CURRENT_DATE > br.due_date"""
+                WHERE br.return_date IS NULL"""
             
-            params = [self.get_fine_per_day()]
+            params = []
             
             if branch_filter and branch_filter != "All":
                 query += " AND s.department = ?"
@@ -3270,13 +3304,32 @@ Government Polytechnic Awasari (Kh)"""
                 query += " AND br.borrow_date <= ?"
                 params.append(date_to)
             
-            query += " ORDER BY days_overdue DESC"
+            query += " ORDER BY br.due_date ASC"
             
             c.execute(query, params)
             rows = c.fetchall()
             conn.close()
             
-            return [list(row) for row in rows]
+            # Calculate days overdue and fine in Python (works for both SQLite and PostgreSQL)
+            from datetime import datetime as _dt
+            today = _dt.now().date()
+            fine_per_day = self.get_fine_per_day()
+            result = []
+            for row in rows:
+                row = list(row)
+                enroll, name, branch, phone, book_id, title, borrow_date, due_date = row[:8]
+                try:
+                    due_d = _dt.strptime(str(due_date), '%Y-%m-%d').date()
+                    days_overdue = (today - due_d).days
+                except Exception:
+                    days_overdue = 0
+                if days_overdue > 0:
+                    fine = days_overdue * fine_per_day
+                    result.append([enroll, name, branch, phone, book_id, title, borrow_date, due_date, days_overdue, fine])
+            
+            # Sort by most overdue first
+            result.sort(key=lambda x: x[8], reverse=True)
+            return result
         except Exception as e:
             print(f"Error getting overdue report data: {e}")
             return []
