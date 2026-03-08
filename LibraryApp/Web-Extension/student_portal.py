@@ -2296,6 +2296,59 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
 </body>
 </html>"""
 
+@app.route('/api/renew', methods=['POST'])
+def api_auto_renew():
+    """Automatically extend the due date of a borrowed book by 2 days."""
+    if 'student_id' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
+    data = request.json
+    book_id = data.get('book_id')
+    if not book_id:
+        return jsonify({'status': 'error', 'message': 'Book ID required'}), 400
+
+    enrollment = session['student_id']
+
+    try:
+        conn = get_library_db()
+        cursor = conn.cursor()
+
+        # Find the active borrow record
+        cursor.execute(
+            "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
+            (book_id, enrollment)
+        )
+        record = cursor.fetchone()
+
+        if not record:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'No active loan found for this book'}), 404
+
+        current_due = record['due_date']
+        try:
+            due_d = datetime.strptime(str(current_due), '%Y-%m-%d')
+        except Exception:
+            due_d = datetime.now()
+
+        new_due = due_d + timedelta(days=2)
+        new_due_str = new_due.strftime('%Y-%m-%d')
+
+        cursor.execute(
+            "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+            (new_due_str, book_id, enrollment)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            'status': 'success',
+            'message': f'Due date extended to {new_due.strftime("%d %b %Y")}',
+            'new_due_date': new_due_str
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Renewal failed: {str(e)}'}), 500
+
+
 @app.route('/api/request', methods=['POST'])
 def api_submit_request():
     if 'student_id' not in session:
