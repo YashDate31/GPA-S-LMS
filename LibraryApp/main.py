@@ -680,13 +680,24 @@ class LibraryApp:
                     max_workers=self.config_manager.get_email_config()['max_workers'],
                     batch_size=self.config_manager.get_email_config()['batch_size']
                 )
+                
+                # Setup Sync Manager for Dual-DB Architecture
                 self.sync_manager = create_sync_manager(self.db)
 
-                # Start auto-sync if enabled and sync is actually available
-                if self.sync_manager and self.config_manager.is_sync_enabled():
-                    sync_interval = self.config_manager.get_sync_interval()
+                if self.sync_manager:
+                    # Sync interval defaults to 15 minutes unless overridden
+                    sync_interval = 15 
+                    if hasattr(self.config_manager, 'get_sync_interval'):
+                        sync_interval = self.config_manager.get_sync_interval()
+                    
+                    # Start the background daemon
                     self.sync_manager.auto_sync_daemon(sync_interval)
-                    print(f"[OK] Auto-sync started (interval: {sync_interval} minutes)")
+                    print(f"[OK] Background Sync Daemon started (interval: {sync_interval} minutes)")
+                    
+                    if self.db.use_cloud:
+                        print("   -> Syncing Supabase changes DOWN to local SQLite for offline fallback.")
+                    else:
+                        print("   -> Syncing local SQLite offline changes UP to Supabase.")
 
                 print(f"[OK] Performance optimization modules loaded successfully")
             except Exception as e:
