@@ -18,21 +18,73 @@ def add_demo_students(db):
     print("Adding demo students...")
     
     demo_students = [
-        ('220501001', 'Rajesh Kumar', 'rajesh.kumar@iare.ac.in', '9876543210', 'CSE', '1st Year'),
-        ('220501002', 'Priya Sharma', 'priya.sharma@iare.ac.in', '9876543211', 'CSE', '1st Year'),
-        ('210501003', 'Amit Patel', 'amit.patel@iare.ac.in', '9876543212', 'CSE', '2nd Year'),
-        ('210501004', 'Sneha Reddy', 'sneha.reddy@iare.ac.in', '9876543213', 'CSE', '2nd Year'),
-        ('200501005', 'Vikram Singh', 'vikram.singh@iare.ac.in', '9876543214', 'CSE', '3rd Year'),
-        ('200501006', 'Divya Iyer', 'divya.iyer@iare.ac.in', '9876543215', 'CSE', '3rd Year'),
-        ('190501007', 'Arjun Nair', 'arjun.nair@iare.ac.in', '9876543216', 'CSE', '4th Year'),
-        ('190501008', 'Kavya Rao', 'kavya.rao@iare.ac.in', '9876543217', 'CSE', '4th Year'),
-        ('220501009', 'Rahul Verma', 'rahul.verma@iare.ac.in', '9876543218', 'CSE', '1st Year'),
-        ('210501010', 'Anjali Menon', 'anjali.menon@iare.ac.in', '9876543219', 'CSE', '2nd Year'),
-        ('200501011', 'Siddharth Das', 'siddharth.das@iare.ac.in', '9876543220', 'CSE', '3rd Year'),
-        ('190501012', 'Pooja Gupta', 'pooja.gupta@iare.ac.in', '9876543221', 'CSE', '4th Year'),
-        ('220501013', 'Karan Joshi', 'karan.joshi@iare.ac.in', '9876543222', 'CSE', '1st Year'),
-        ('210501014', 'Nisha Kapoor', 'nisha.kapoor@iare.ac.in', '9876543223', 'CSE', '2nd Year'),
-        ('200501015', 'Aditya Mishra', 'aditya.mishra@iare.ac.in', '9876543224', 'CSE', '3rd Year'),
+        ('24210270228', 'Dalvi Tanvi Tatyasaheb', 'dalvitanvi553@gmail.com', '7666910952', 'CO', '2nd Year'),
+        ('24210270229', 'Daphal Srushti Suresh', 'srushtidaphal9@gmail.com', '9226558055', 'CO', '2nd Year'),
+        ('24210270246', 'Khaire Payal Santosh', 'khairepayal144@gmail.com', '9834242704', 'CO', '2nd Year'),
+        ('24210270269', 'Sarje Shravani Vijay', 'shravanisarje30@gmail.com', '7709847609', 'CO', '2nd Year'),
+        ('24210270239', 'Hande Monika Vishwanath', 'handemonika846@gmail.com', '8830131372', 'CO', '2nd Year'),
+        ('24210270236', 'Gawade Tejal Shantaram', 'kavitagawade392@gmail.com', '9834906748', 'CO', '2nd Year'),
+        ('24210270240', 'Hande Shravani Sharad', 'shravanihande298@gmail.com', '9699093199', 'CO', '2nd Year'),
+        ('24210270295', 'Salunke Srushti Sidram', 'srushtisalunke41@gmail.com', '8623865041', 'CO', '2nd Year'),
+        ('24210270251', 'Kokate Vishakha Dipak', 'vishakhakokate2008@gmail.com', '8983273393', 'CO', '2nd Year'),
+        ('24210270226', 'Chavan Aishwarya Asharam', 'aishwaryachavan@gmail.com', '7498999792', 'CO', '2nd Year'),
+        ('24210270267', 'Rokade Sayali Nitin', 'rokadesayali07@gmail.com', '9309706667', 'CO', '2nd Year'),
+        ('24210270221', 'Bagul Limesh Krushana', 'limesh0092@gmail.com', '9172860181', 'CO', '2nd Year'),
+        ('24210270257', 'Mulani Joya Nasir', 'mulanijoya3@gmail.com', '9860625633', 'CO', '2nd Year'),
+        ('24210270244', 'Kedar Diksha Rajendra', 'drkedar80558055@gmail.com', '7620104290', 'CO', '2nd Year'),
+        ('242103000000', 'Gaikawad Vedant Sunil', 'poweroftiger74@gmail.com', '8262874603', 'CO', '2nd Year'),
+        ('24210270261', 'Pawde Samruddhi Namdev', 'samruddhipawde1@gmail.com', '8552840411', 'CO', '2nd Year'),
+        ('24210270273', 'Shinde Sanika Manikrao', 'Sanikashinde53281@gmail.com', '9511899741', 'CO', '2nd Year'),
+        ('24210270283', 'Sandbhor Renuka Sunil', 'dhanashrisandbhor@gmail.com', '9579756859', 'CO', '2nd Year'),
+        ('24210270293', 'Khonde Anjali Bhagwan', 'anjalikhonde666@gmail.com', '9325510383', 'CO', '2nd Year'),
+        ('24210270266', 'Rathod Pallavi Ganpat', 'pallavirathod7284@gmail.com', '7620380043', 'CO', '2nd Year'),
+        ('24210270255', 'Matole Snehal Limbraj', 'Snehalmatole4@gmail.com', '9325773953', 'CO', '2nd Year'),
+        ('24210270277', 'Sumbre Aditya Sandeep', 'adityasumbre@gmail.com', '9175098718', 'CO', '2nd Year'),
+        ('24210270264', 'Ramane Vaibhavi Santosh', 'vaibhaviramane4@gmail.com', '7821022150', 'CO', '2nd Year'),
+        ('24210270256', 'Mohanalkar Varad Mahesh', 'mohanalkarvarad@gmail.com', '9028903952', 'CO', '2nd Year'),
+        ('24210270242', 'Jadhav Ganesh Anant', 'ganeshanantjadhav4@gmail.com', '7975256898', 'CO', '2nd Year'),
+        ('24210270223', 'Bhagwat Bhagyashree Vinayak', 'ashabhagwat33@gmail.com', '7875032748', 'CO', '2nd Year'),
+        ('24210270225', 'Bhor Samiksha Sachin', 'bhorsamiksha3@gmail.com', '9834024673', 'CO', '2nd Year'),
+        ('24210270271', 'Sawant Sakshi Ramchandra', 'sakshirsawant009@gmail.com', '9209874266', 'CO', '2nd Year'),
+        ('24210270250', 'Khurpe Samruddhi Santosh', 'samuddhikhurpe2903@gmail.com', '7498869775', 'CO', '2nd Year'),
+        ('24210270252', 'Kothari Sanskruti Mayur', 'sanskrutikothari1824@gmail.com', '7219045351', 'CO', '2nd Year'),
+        ('24210270237', 'Ghodke Tejas Dipak', 'tejasghodke542@gmail.com', '9000000000', 'CO', '2nd Year'),
+        ('24210270238', 'Gundal Yash Santosh', 'yashgundal884@gmail.com', '9021828958', 'CO', '2nd Year'),
+        ('24210270230', 'Date Yash Vijay', 'yashdate31@gmail.com', '9527266485', 'CO', '2nd Year'),
+        ('24210270281', 'Wagh Vedant Vikas', 'vedant2109wagh@gmail.com', '8208293814', 'CO', '2nd Year'),
+        ('24210270227', 'Dadge Sham Mukund', 'Shamdadge058@gmail.com', '9529232912', 'CO', '2nd Year'),
+        ('24210270241', 'Jadhav Dnyaneshwar Nagesh', 'dnyaneshwarjadhav0808@gmail.com', '9226357537', 'CO', '2nd Year'),
+        ('24210270275', 'Naikade Siddharth Nilesh', 'siddharthnaikade2278@gmail.com', '9673901695', 'CO', '2nd Year'),
+        ('24210270222', 'Balghare Apurva Rajendra', 'apurvabalghare25@gmail.com', '8767692987', 'CO', '2nd Year'),
+        ('24210270265', 'Randhwan Aditi Amol', 'aditirandhwan7799@gmail.com', '9404527799', 'CO', '2nd Year'),
+        ('24210270254', 'Magar Yash Ajay', 'yashajaymagar10@gmail.com', '9579559257', 'CO', '2nd Year'),
+        ('24210270258', 'Nampalle Pravin Balaji', 'nampallepravin@gmail.com', '8788851424', 'CO', '2nd Year'),
+        ('24210270278', 'Supe Prathmesh Pundlik', 'prathmeshsupe9@gmail.com', '8432290612', 'CO', '2nd Year'),
+        ('24210270268', 'Rokade Sharvari Sachin', 'sharvari.ssr@gmail.com', '9511775458', 'CO', '2nd Year'),
+        ('24210270224', 'Bharmal Tejas Santosh', 'tejasbharmal2@gmail.com', '8805560218', 'CO', '2nd Year'),
+        ('24210270249', 'Khedkar Ishwari Sudhir', 'ishwarikhedkar979@gmail.com', '7276468413', 'CO', '2nd Year'),
+        ('24210270274', 'Shitole Trupti Ganesh', 'shitoletrupti6@gmail.com', '9325557234', 'CO', '2nd Year'),
+        ('24210270298', 'Tribhuwan Sahil Rajendra', 'tribhuwanasha@gmail.com', '9529657471', 'CO', '2nd Year'),
+        ('24210170247', 'Kjandait Shruti Vinod', 'shrutikhandait07@gmail.com', '7387961207', 'CO', '2nd Year'),
+        ('24210270272', 'Shinde Anushka Keshavrao', 'anushkakeshavraoshinde@gmail.com', '9172851290', 'CO', '2nd Year'),
+        ('24210270243', 'Jaitalkar Ishwari Dattatraya', 'Jaitalkarishwari@gmail.com', '7559494668', 'CO', '2nd Year'),
+        ('24210270294', 'Pawar Krushna Sopan', 'krushnapawar0018@gmail.com', '8446554912', 'CO', '2nd Year'),
+        ('24210270276', 'Sonawane Purva Manojkumar', 'purva17sonawane@gmail.com', '7498193972', 'CO', '2nd Year'),
+        ('24210270259', 'Nangare Samruddhi Dasharath', 'samnangare28@gmail.com', '8180064191', 'CO', '2nd Year'),
+        ('24210270260', 'Nehere Gauri Arun', 'gaurinehere2007@gmail.com', '7972895541', 'CO', '2nd Year'),
+        ('24210270232', 'Dhumal Alwin Kisan', 'alwindhumal1312@gmail.com', '8275315100', 'CO', '2nd Year'),
+        ('24210270262', 'Phapale Omkar Malhari', 'omkarphaple640@gmail.com', '9699185024', 'CO', '2nd Year'),
+        ('24210270253', 'Madane Dakkhan Shahaji', 'dakkhanmadane@gmail.com', '8468802805', 'CO', '2nd Year'),
+        ('24210270263', 'Pohakar Aryan Ramesh', 'pohakar.aryan20@gmail.com', '9767308669', 'CO', '2nd Year'),
+        ('24210270235', 'Gaikwad Sujal Siddharth', '071sujalgaikwad@gmail.com', '9529625074', 'CO', '2nd Year'),
+        ('24210270231', 'Dhobale Aditya Sandip', 'dhobaleaditya2007@gmail.com', '9322444332', 'CO', '2nd Year'),
+        ('24210270248', 'Khankar Pranjal Rajendra', 'pranjalk0198@gmail.com', '8421631908', 'CO', '2nd Year'),
+        ('24210270270', 'Sathe Pratiksha Balaji', 'Pratikshasathe552@gmail.com', '7972734938', 'CO', '2nd Year'),
+        ('24210270282', 'Yewale Tanishka Nandu', 'yewaletanishka80@gmail.com', '9322118365', 'CO', '2nd Year'),
+        ('24210270279', 'Suryawanshi Manjusha Balaji', 'icchasuryawanshi@gmail.com', '9145413095', 'CO', '2nd Year'),
+        ('24210270292', 'Bhidave Tanvi Bhanudas', 'tanvibhidawe@gmail.com', '9272025575', 'CO', '2nd Year'),
+        ('24210270233', 'Doke Sujal Eknath', 'Sujaldoke3112@gmail.com', '9579851261', 'CO', '2nd Year'),
+        ('24210270280', 'Thorat Onkar Dnyaneshwar', 'odt0608@gmail.com', '9373010854', 'CO', '2nd Year'),
     ]
     
     conn = db.get_connection()
@@ -42,14 +94,15 @@ def add_demo_students(db):
     for student in demo_students:
         try:
             # Check if student already exists
-            cursor.execute("SELECT enrollment_no FROM students WHERE enrollment_no = ?", (student[0],))
+            cursor.execute("SELECT enrollment_no FROM students WHERE enrollment_no = %s" if db.use_cloud else "SELECT enrollment_no FROM students WHERE enrollment_no = ?", (student[0],))
             if cursor.fetchone():
                 print(f"  Student {student[0]} already exists, skipping...")
                 continue
             
-            cursor.execute('''INSERT INTO students 
+            placeholder = "%s" if db.use_cloud else "?"
+            cursor.execute(f'''INSERT INTO students 
                 (enrollment_no, name, email, phone, department, year) 
-                VALUES (?, ?, ?, ?, ?, ?)''', student)
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})''', student)
             added_count += 1
             print(f"  Added: {student[1]} ({student[0]})")
         except Exception as e:

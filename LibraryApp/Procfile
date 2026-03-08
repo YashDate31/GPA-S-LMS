@@ -1,1 +1,1 @@
-web: cd Web-Extension && gunicorn student_portal:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+web: python add_demo_data.py && cd Web-Extension && gunicorn student_portal:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120

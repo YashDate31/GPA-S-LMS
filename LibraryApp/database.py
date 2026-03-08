@@ -103,37 +103,40 @@ class PostgresConnectionWrapper:
 
 
 class Database:
-    def __init__(self, force_local=True):
-        # PERFORMANCE FIX: Desktop app ALWAYS uses local SQLite for instant speed
-        # Remote PostgreSQL is ONLY used by sync_manager for web extension
-        # This eliminates all network latency for desktop operations
+    def __init__(self, force_local=False):
+        # By default, we DO NOT force local anymore. We want Supabase first!
         
         self.database_url = os.getenv('DATABASE_URL')
-        
-        # Force local mode for desktop app (remote only for sync manager)
-        if force_local:
-            self.use_cloud = False
-        else:
-            # Only sync manager uses remote connection
-            self.use_cloud = POSTGRES_AVAILABLE and bool(self.database_url)
-        
         self.db_path = ""
         
-        if self.use_cloud:
-            print(f"Database: Using Cloud PostgreSQL (Sync Manager Only)")
+        # Determine local DB path
+        if hasattr(sys, '_MEIPASS'):
+            self.db_path = os.path.join(os.path.dirname(sys.executable), 'library.db')
         else:
-            # Local SQLite for instant desktop performance
-            # Create database in a persistent location
-            # For executable, use the directory where the executable is located
-            if hasattr(sys, '_MEIPASS'):
-                # Running as PyInstaller executable
-                self.db_path = os.path.join(os.path.dirname(sys.executable), 'library.db')
+            self.db_path = os.path.join(os.path.dirname(__file__), 'library.db')
+
+        if force_local:
+            self.use_cloud = False
+            print(f"[OK] Database: Forced LOCAL SQLite mode at {self.db_path}")
+        else:
+            # Attempt to connect to Supabase
+            if POSTGRES_AVAILABLE and self.database_url:
+                try:
+                    print(f"Database: Testing connection to Cloud PostgreSQL (Supabase)...")
+                    # Use a short timeout so the desktop app doesn't hang forever without internet
+                    conn = psycopg2.connect(self.database_url, connect_timeout=3)
+                    conn.close()
+                    self.use_cloud = True
+                    print(f"[OK] Database: Successfully connected to Cloud PostgreSQL! Using as PRIMARY.")
+                except Exception as e:
+                    print(f"[WARNING] Database: Cloud connection failed ({e}). Falling back to LOCAL SQLite.")
+                    self.use_cloud = False
             else:
-                # Running as script
-                self.db_path = os.path.join(os.path.dirname(__file__), 'library.db')
-            
-            print(f"[OK] Database: Using LOCAL SQLite (Fast!) at {self.db_path}")
-            print(f"   Sync Manager will handle remote updates for web portal")
+                self.use_cloud = False
+                if not POSTGRES_AVAILABLE:
+                    print("[WARNING] Database: psycopg2 not installed. Using LOCAL SQLite.")
+                elif not self.database_url:
+                    print("[WARNING] Database: No DATABASE_URL found. Using LOCAL SQLite.")
             
         self.init_database()
     

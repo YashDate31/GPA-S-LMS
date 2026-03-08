@@ -633,29 +633,23 @@ def api_admin_observability():
 def get_db_connection(local_db_name):
     """Generic connection factory: Postgres (if env) or Local SQLite"""
     def _should_use_cloud_db() -> bool:
-        # Desktop app should default to LOCAL DB even if a cloud DATABASE_URL exists in .env.
-        # Enable cloud explicitly when deploying the portal.
+        # Check if forced local
         force_local = os.getenv('PORTAL_FORCE_LOCAL', '').strip().lower() in ('1', 'true', 'yes')
         if force_local:
             return False
 
-        use_cloud = os.getenv('PORTAL_USE_CLOUD', '').strip().lower() in ('1', 'true', 'yes')
-        if use_cloud:
-            return True
-
-        # Auto-detect common cloud runtimes
-        if os.getenv('DYNO') or os.getenv('RENDER') or os.getenv('FLY_APP_NAME') or os.getenv('WEBSITE_INSTANCE_ID'):
-            return True
-
-        return False
+        # Otherwise, if DATABASE_URL is present, we attempt cloud by default
+        return True
 
     database_url = os.getenv('DATABASE_URL')
     if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db():
         try:
-            conn = psycopg2.connect(database_url)
+            print(f"Portal: Testing connection to Cloud PostgreSQL (Supabase)...")
+            # 3 second timeout to prevent hanging on boot if internet is down
+            conn = psycopg2.connect(database_url, connect_timeout=3)
             return PostgresConnectionWrapper(conn)
         except Exception as e:
-            print(f"Cloud DB Connection Error: {e}")
+            print(f"[WARNING] Portal: Cloud DB Connection Error: {e}. Falling back to SQLite.")
             # Fallback to local if connection fails
             pass
             
@@ -682,7 +676,13 @@ def get_portal_db():
 def create_table_safe(cursor, table_name, pg_sql, sqlite_sql):
     """Helper to create tables with backend-specific syntax"""
     database_url = os.getenv('DATABASE_URL')
-    if database_url:
+    
+    # Check if the cursor is a Postgres cursor (it's wrapped in our PostgresCursorWrapper or native)
+    is_postgres = False
+    if hasattr(cursor, 'cursor') and 'psycopg2' in str(type(cursor.cursor)):
+        is_postgres = True
+        
+    if database_url and POSTGRES_AVAILABLE and is_postgres:
         try:
             cursor.execute(pg_sql)
         except Exception as e:
