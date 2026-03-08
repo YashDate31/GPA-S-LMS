@@ -107,7 +107,7 @@ class SyncManager:
             remote_conn = psycopg2.connect(**self.remote_config)
             
             # Library tables (bidirectional sync)
-            tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity']
+            tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
             
             for idx, table in enumerate(tables_to_sync):
                 if progress_callback:
@@ -300,7 +300,9 @@ class SyncManager:
             'borrow_records': 'id',
             'admin_activity': 'id',
             'requests': 'req_id',
-            'notices': 'id'
+            'notices': 'id',
+            'academic_years': 'id',
+            'promotion_history': 'id'
         }
         return pk_map.get(table_name, 'id')
     
