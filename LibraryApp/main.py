@@ -157,7 +157,7 @@ class LibraryApp:
                 self.root.after(0, lambda: callback(result))
             except Exception as e:
                 print(f"Background thread error: {e}")
-                self.root.after(0, lambda: callback(e)) # Pass error to callback
+                self.root.after(0, lambda err=e: callback(err)) # Pass error to callback
         
         threading.Thread(target=wrapper, daemon=True).start()
 
@@ -1008,8 +1008,8 @@ class LibraryApp:
             now = datetime.now().strftime("%I:%M %p")
             set_status(f"✔️ Updated {now}", '#94a3b8')
             
-            # Schedule next refresh in 30 seconds
-            self.root.after(30000, self._refresh_all_data)
+            # Schedule next refresh in 2 minutes (120 seconds)
+            self.root.after(120000, self._refresh_all_data)
 
         # Start the sequence
         run_refresh_sequence()
@@ -5093,10 +5093,19 @@ Current Settings:
                 bg=self.colors['primary'], 
                 fg=self.colors['accent']).pack(anchor='w', pady=(0, 8))
         
+        # Autocomplete cache to avoid hitting DB on every keystroke
+        import time as _time
+        _ac_cache = {'students': None, 'students_ts': 0, 'books': None, 'books_ts': 0}
+        _AC_CACHE_TTL = 30  # seconds
+
         # Autocomplete for student enrollment
         def get_student_suggestions(query):
             try:
-                students = self.db.get_students()
+                now = _time.time()
+                if _ac_cache['students'] is None or (now - _ac_cache['students_ts']) > _AC_CACHE_TTL:
+                    _ac_cache['students'] = self.db.get_students()
+                    _ac_cache['students_ts'] = now
+                students = _ac_cache['students']
                 matches = []
                 query_lower = query.lower()
                 for s in students:
@@ -5141,7 +5150,11 @@ Current Settings:
         # Autocomplete for book ID - also searches by barcode
         def get_book_suggestions(query):
             try:
-                books = self.db.get_books()
+                now = _time.time()
+                if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
+                    _ac_cache['books'] = self.db.get_books()
+                    _ac_cache['books_ts'] = now
+                books = _ac_cache['books']
                 matches = []
                 query_lower = query.lower()
                 for b in books:
@@ -5164,8 +5177,12 @@ Current Settings:
             if event.keysym == 'Return':
                 query = self.borrow_book_id_entry.get().strip()
                 if query:
-                    # Check if this is a barcode match
-                    books = self.db.get_books()
+                    # Use cached books if available
+                    now = _time.time()
+                    if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
+                        _ac_cache['books'] = self.db.get_books()
+                        _ac_cache['books_ts'] = now
+                    books = _ac_cache['books']
                     for b in books:
                         barcode = str(b.get('barcode', '') or '')
                         if barcode and barcode.lower() == query.lower():
@@ -5335,7 +5352,11 @@ Current Settings:
         # Autocomplete for return student enrollment
         def get_return_student_suggestions(query):
             try:
-                students = self.db.get_students()
+                now = _time.time()
+                if _ac_cache['students'] is None or (now - _ac_cache['students_ts']) > _AC_CACHE_TTL:
+                    _ac_cache['students'] = self.db.get_students()
+                    _ac_cache['students_ts'] = now
+                students = _ac_cache['students']
                 matches = []
                 query_lower = query.lower()
                 for s in students:
@@ -5379,7 +5400,11 @@ Current Settings:
         # Autocomplete for return book ID - also searches by barcode
         def get_return_book_suggestions(query):
             try:
-                books = self.db.get_books()
+                now = _time.time()
+                if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
+                    _ac_cache['books'] = self.db.get_books()
+                    _ac_cache['books_ts'] = now
+                books = _ac_cache['books']
                 matches = []
                 query_lower = query.lower()
                 for b in books:
@@ -5402,8 +5427,12 @@ Current Settings:
             if event.keysym == 'Return':
                 query = self.return_book_id_entry.get().strip()
                 if query:
-                    # Check if this is a barcode match
-                    books = self.db.get_books()
+                    # Use cached books if available
+                    now = _time.time()
+                    if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
+                        _ac_cache['books'] = self.db.get_books()
+                        _ac_cache['books_ts'] = now
+                    books = _ac_cache['books']
                     for b in books:
                         barcode = str(b.get('barcode', '') or '')
                         if barcode and barcode.lower() == query.lower():
@@ -7648,31 +7677,32 @@ Current Settings:
                 pass
     
     def refresh_academic_year_display(self):
-        """Refresh the academic year display in the header"""
-        try:
-            if hasattr(self, 'academic_year_label'):
-                active_year = self.db.get_active_academic_year()
+        """Refresh the academic year display in the header (async)"""
+        def _fetch_year():
+            return self.db.get_active_academic_year()
+        
+        def _update_year(active_year):
+            try:
+                if isinstance(active_year, Exception):
+                    return
                 if not active_year:
-                    active_year = "2025-2026"  # Default fallback
-                
-                # Convert format from "2025-2026" to "25-26"
-                if "-" in active_year:
-                    years = active_year.split("-")
-                    if len(years) == 2:
-                        # Extract last 2 digits of each year
-                        year1 = years[0][-2:]  # "2025" -> "25"
-                        year2 = years[1][-2:]  # "2026" -> "26"
-                        display_year = f"{year1}-{year2}"
+                    active_year = "2025-2026"
+                if hasattr(self, 'academic_year_label'):
+                    if "-" in active_year:
+                        years = active_year.split("-")
+                        if len(years) == 2:
+                            year1 = years[0][-2:]
+                            year2 = years[1][-2:]
+                            display_year = f"{year1}-{year2}"
+                        else:
+                            display_year = active_year
                     else:
                         display_year = active_year
-                else:
-                    display_year = active_year
-                
-                self.academic_year_label.config(text=f"Academic Year: {display_year}")
-                # Force the GUI to update
-                self.academic_year_label.update_idletasks()
-        except Exception as e:
-            pass  # Silently fail if label doesn't exist yet
+                    self.academic_year_label.config(text=f"Academic Year: {display_year}")
+            except Exception:
+                pass
+        
+        self.run_in_background_thread(_fetch_year, _update_year)
     
     def refresh_students(self):
         """Refresh students list"""

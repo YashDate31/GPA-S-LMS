@@ -25,6 +25,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from database import PostgresConnectionWrapper
     import psycopg2
+    import psycopg2.pool
     from psycopg2.extras import RealDictCursor
     POSTGRES_AVAILABLE = True
 except ImportError:
@@ -32,6 +33,12 @@ except ImportError:
     psycopg2 = None
     RealDictCursor = None
     POSTGRES_AVAILABLE = False
+
+# Global connection pool for PostgreSQL (portal)
+_portal_pg_pool = None
+_portal_pool_lock = threading.Lock()
+_portal_pool_failed = False  # Track if pool init already failed to avoid repeated timeouts
+_portal_cloud_failed = False  # Track if cloud connection failed entirely
 
 
 # --- Configuration ---
@@ -631,27 +638,49 @@ def api_admin_observability():
         return jsonify({'status': 'error', 'message': 'Observability failed', 'error_id': error_id}), 500
 
 def get_db_connection(local_db_name):
-    """Generic connection factory: Postgres (if env) or Local SQLite"""
+    """Generic connection factory: Postgres pool (if env) or Local SQLite"""
+    global _portal_pg_pool, _portal_pool_failed, _portal_cloud_failed
+
     def _should_use_cloud_db() -> bool:
-        # Check if forced local
         force_local = os.getenv('PORTAL_FORCE_LOCAL', '').strip().lower() in ('1', 'true', 'yes')
         if force_local:
             return False
-
-        # Otherwise, if DATABASE_URL is present, we attempt cloud by default
         return True
 
     database_url = os.getenv('DATABASE_URL')
-    if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db():
-        try:
-            print(f"Portal: Testing connection to Cloud PostgreSQL (Supabase)...")
-            # 3 second timeout to prevent hanging on boot if internet is down
-            conn = psycopg2.connect(database_url, connect_timeout=3)
-            return PostgresConnectionWrapper(conn)
-        except Exception as e:
-            print(f"[WARNING] Portal: Cloud DB Connection Error: {e}. Falling back to SQLite.")
-            # Fallback to local if connection fails
-            pass
+    if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db() and not _portal_cloud_failed:
+        # Initialize pool once (skip if already failed)
+        if _portal_pg_pool is None and not _portal_pool_failed:
+            with _portal_pool_lock:
+                if _portal_pg_pool is None and not _portal_pool_failed:
+                    try:
+                        _portal_pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                            minconn=2, maxconn=20,
+                            dsn=database_url,
+                            connect_timeout=5
+                        )
+                        print("[OK] Portal: Connection pool initialized (2-20 connections)")
+                    except Exception as e:
+                        _portal_pool_failed = True
+                        print(f"[WARNING] Portal: Pool init failed ({e}). Will use SQLite fallback.")
+        
+        # Get connection from pool
+        if _portal_pg_pool:
+            try:
+                conn = _portal_pg_pool.getconn()
+                conn.autocommit = False
+                return PostgresConnectionWrapper(conn, pool=_portal_pg_pool)
+            except Exception as e:
+                print(f"[WARNING] Portal: Pool connection failed ({e}). Trying direct.")
+        
+        # Fallback: direct connection (only if pool failed but we haven't given up on cloud)
+        if not _portal_cloud_failed:
+            try:
+                conn = psycopg2.connect(database_url, connect_timeout=5)
+                return PostgresConnectionWrapper(conn)
+            except Exception as e:
+                _portal_cloud_failed = True
+                print(f"[WARNING] Portal: Cloud DB unreachable ({e}). Using SQLite for this session.")
             
     # Local SQLite fallback
     if local_db_name == 'library.db':
