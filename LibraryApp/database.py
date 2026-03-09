@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import sys
+import threading
 from datetime import datetime
 try:
     from dotenv import load_dotenv
@@ -131,17 +132,14 @@ class Database:
 
 
     def __init__(self, force_local=False):
-        # By default, we DO NOT force local anymore. We want Supabase first!
+        # LOCAL-FIRST ARCHITECTURE: Always use local SQLite for speed.
+        # Background SyncManager handles bidirectional sync with Supabase.
         
         self.database_url = os.getenv('DATABASE_URL')
         # Ensure sslmode is set for Supabase
         if self.database_url and 'sslmode' not in self.database_url:
             separator = '&' if '?' in self.database_url else '?'
             self.database_url = self.database_url + separator + 'sslmode=require'
-        
-        # (Removed _force_ipv4_url because pooler.supabase.com only uses IPv4 and works flawlessly,
-        # but replacing the hostname with an IP address breaks the PostgreSQL SNI handshake 
-        # required by Supabase's pooling edge proxies.)
         
         self.db_path = ""
         
@@ -151,63 +149,42 @@ class Database:
         else:
             self.db_path = os.path.join(os.path.dirname(__file__), 'library.db')
 
-        if force_local:
-            self.use_cloud = False
-            print(f"[OK] Database: Forced LOCAL SQLite mode at {self.db_path}")
+        # Always use local SQLite — cloud sync happens in background via SyncManager
+        self.use_cloud = False
+        if self.database_url and POSTGRES_AVAILABLE:
+            print(f"[OK] Database: LOCAL SQLite (primary) at {self.db_path}")
+            print(f"     Cloud sync enabled — SyncManager will sync with Supabase in background.")
         else:
-            # Attempt to connect to Supabase
-            if POSTGRES_AVAILABLE and self.database_url:
-                try:
-                    print(f"Database: Testing connection to Cloud PostgreSQL (Supabase)...")
-                    # Use a short timeout so the desktop app doesn't hang forever without internet
-                    conn = psycopg2.connect(self.database_url, connect_timeout=3)
-                    conn.close()
-                    self.use_cloud = True
-                    print(f"[OK] Database: Successfully connected to Cloud PostgreSQL! Using as PRIMARY.")
-                except Exception as e:
-                    print(f"[WARNING] Database: Cloud connection failed ({e}). Falling back to LOCAL SQLite.")
-                    self.use_cloud = False
-            else:
-                self.use_cloud = False
-                if not POSTGRES_AVAILABLE:
-                    print("[WARNING] Database: psycopg2 not installed. Using LOCAL SQLite.")
-                elif not self.database_url:
-                    print("[WARNING] Database: No DATABASE_URL found. Using LOCAL SQLite.")
+            print(f"[OK] Database: LOCAL SQLite at {self.db_path} (no cloud sync configured)")
             
-        # Initialize connection pool for PostgreSQL
-        # (Disabled: ThreadedConnectionPool with Tkinter threads + Supabase edge pooler causes 
-        # "SSL connection has been closed unexpectedly" errors due to thread cleanup. We rely on standard direct connect)
         self._pg_pool = None
 
         self.init_database()
     
-    def get_connection(self):
-        if self.use_cloud:
-            # Use connection pool if available
-            if self._pg_pool:
-                try:
-                    conn = self._pg_pool.getconn()
-                    conn.autocommit = False
-                    return PostgresConnectionWrapper(conn, pool=self._pg_pool)
-                except Exception as e:
-                    print(f"Pool connection failed: {e}. Trying direct connection.")
-            # Fallback to direct connection
+    def _push_to_cloud(self, sql, params=None):
+        """Fire-and-forget: replicate a write to Supabase in a background thread.
+        Failures are silent — the periodic SyncManager will catch up."""
+        if not self.database_url or not POSTGRES_AVAILABLE:
+            return
+        def _do_push():
             try:
+                pg_sql = sql.replace('?', '%s')
+                pg_sql = pg_sql.replace('INSTR(', 'STRPOS(').replace('instr(', 'strpos(')
                 conn = psycopg2.connect(self.database_url, connect_timeout=5)
-                return PostgresConnectionWrapper(conn)
+                cur = conn.cursor()
+                cur.execute(pg_sql, params)
+                conn.commit()
+                conn.close()
             except Exception as e:
-                print(f"Cloud DB Connection Failed: {e}. Falling back to local SQLite.")
-                # Fall back to local SQLite silently
-                conn = sqlite3.connect(self.db_path)
-                conn.row_factory = sqlite3.Row
-                conn.execute('PRAGMA foreign_keys = ON')
-                return conn
-        else:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            # Enforce foreign keys for SQLite (Postgres does this by default)
-            conn.execute('PRAGMA foreign_keys = ON')
-            return conn
+                print(f"[Cloud Push] Failed (will retry on next sync): {e}")
+        threading.Thread(target=_do_push, daemon=True).start()
+
+    def get_connection(self):
+        """Always returns a local SQLite connection for fast, lag-free operation"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        return conn
     
     def create_table_safe(self, cursor, table_name, pg_sql, sqlite_sql):
         """Execute appropriate CREATE TABLE based on backend"""
@@ -578,6 +555,14 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (enrollment_no, name, email, phone, department, year))
             conn.commit()
+            # Push to cloud immediately so web portal login works right away
+            self._push_to_cloud('''
+                INSERT INTO students (enrollment_no, name, email, phone, department, year)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (enrollment_no) DO UPDATE SET
+                    name=EXCLUDED.name, email=EXCLUDED.email, phone=EXCLUDED.phone,
+                    department=EXCLUDED.department, year=EXCLUDED.year
+            ''', (enrollment_no, name, email, phone, department, year))
             return True, "Student added successfully"
         except sqlite3.IntegrityError:
             return False, "Enrollment Number already exists"
@@ -603,6 +588,10 @@ class Database:
                 WHERE enrollment_no=?
             ''', (name, email, phone, department, year, enrollment_no))
             conn.commit()
+            self._push_to_cloud('''
+                UPDATE students SET name=?, email=?, phone=?, department=?, year=?
+                WHERE enrollment_no=?
+            ''', (name, email, phone, department, year, enrollment_no))
             return True, "Student updated successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -634,6 +623,7 @@ class Database:
             conn.commit()
             
             if cursor.rowcount > 0:
+                self._push_to_cloud("DELETE FROM students WHERE enrollment_no = ?", (enrollment_no,))
                 return True, f"Student '{student_name}' removed successfully"
             else:
                 return False, "Failed to remove student"
@@ -660,6 +650,14 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
             conn.commit()
+            self._push_to_cloud('''
+                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (book_id) DO UPDATE SET
+                    title=EXCLUDED.title, author=EXCLUDED.author, isbn=EXCLUDED.isbn,
+                    category=EXCLUDED.category, total_copies=EXCLUDED.total_copies,
+                    available_copies=EXCLUDED.available_copies, barcode=EXCLUDED.barcode, price=EXCLUDED.price
+            ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
             return True, "Book added successfully"
         except sqlite3.IntegrityError:
             return False, "Book ID already exists"
@@ -696,6 +694,13 @@ class Database:
                 WHERE book_id=?
             ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
             conn.commit()
+            
+            # Push to cloud
+            self._push_to_cloud('''
+                UPDATE books SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?
+                WHERE book_id=?
+            ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
+            
             return True, "Book updated successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -798,6 +803,14 @@ class Database:
             ''', (book_id,))
             
             conn.commit()
+            # Push borrow record + copies update to cloud
+            self._push_to_cloud('''
+                INSERT INTO borrow_records (enrollment_no, book_id, accession_no, borrow_date, due_date, academic_year)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year))
+            self._push_to_cloud('''
+                UPDATE books SET available_copies = available_copies - 1 WHERE book_id = ?
+            ''', (book_id,))
             return True, "Book borrowed successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -841,6 +854,15 @@ class Database:
             ''', (book_id,))
             
             conn.commit()
+            
+            # Push return to cloud
+            self._push_to_cloud('''
+                UPDATE borrow_records SET return_date = ?, status = 'returned'
+                WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
+            ''', (return_date, enrollment_no, book_id))
+            self._push_to_cloud('''
+                UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?
+            ''', (book_id,))
             
             # Notify waitlist - get book title for notification
             cursor.execute('SELECT title FROM books WHERE book_id = ?', (book_id,))
@@ -1094,6 +1116,10 @@ class Database:
                 return False, "Book not found"
             
             conn.commit()
+            
+            # Push to cloud
+            self._push_to_cloud('DELETE FROM books WHERE book_id = ?', (book_id,))
+            
             return True, "Book deleted successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
