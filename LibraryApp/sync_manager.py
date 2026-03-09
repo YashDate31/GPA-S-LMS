@@ -548,25 +548,42 @@ class SyncManager:
             return 0
             return 0
     
-    def auto_sync_daemon(self, interval_minutes=30):
-        """Run automatic sync in background thread"""
+    def auto_sync_daemon(self, interval_minutes=5):
+        """Run automatic sync in background thread.
+        
+        Performs an immediate initial sync (remote→local) so the desktop
+        starts with the latest cloud data, then continues syncing
+        bidirectionally on the given interval.
+        """
         def sync_loop():
+            # Initial sync: pull cloud data into local SQLite
+            print(f"[Auto-Sync] Initial sync (cloud → local) started...")
+            try:
+                result = self.sync_now(direction='remote_to_local')
+                if result.get('success'):
+                    print(f"[Auto-Sync] Initial pull complete: {result.get('records_synced', 0)} records")
+                else:
+                    errors = result.get('errors', result.get('error', 'Unknown'))
+                    print(f"[Auto-Sync] Initial pull had issues: {errors}")
+            except Exception as e:
+                print(f"[Auto-Sync] Initial pull failed: {e}")
+
             while True:
                 time.sleep(interval_minutes * 60)
-                print(f"[Auto-Sync] Starting sync at {datetime.now()}")
+                print(f"[Auto-Sync] Background sync at {datetime.now().strftime('%H:%M:%S')}")
                 try:
                     result = self.sync_now(direction='both')
                     if result.get('success'):
-                        print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records")
+                        print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records synced")
                     else:
                         errors = result.get('errors', result.get('error', 'Unknown'))
-                        print(f"[Auto-Sync] Failed: {errors}")
+                        print(f"[Auto-Sync] Completed with issues: {errors}")
                 except Exception as e:
                     print(f"[Auto-Sync] Exception: {e}")
         
         thread = threading.Thread(target=sync_loop, daemon=True)
         thread.start()
-        print(f"[Auto-Sync] Daemon started (every {interval_minutes} minutes)")
+        print(f"[Auto-Sync] Daemon started (initial pull + every {interval_minutes} min)")
 
 
 def create_sync_manager(db):

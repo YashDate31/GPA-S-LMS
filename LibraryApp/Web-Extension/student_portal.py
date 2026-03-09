@@ -654,28 +654,21 @@ def api_admin_observability():
         return jsonify({'status': 'error', 'message': 'Observability failed', 'error_id': error_id}), 500
 
 def get_db_connection(local_db_name):
-    """Generic connection factory: Postgres pool (if env) or Local SQLite"""
-    global _portal_pg_pool, _portal_pool_failed, _portal_cloud_fail_time
-
-    def _should_use_cloud_db() -> bool:
-        force_local = os.getenv('PORTAL_FORCE_LOCAL', '').strip().lower() in ('1', 'true', 'yes')
-        if force_local:
-            return False
-        return True
-
+    """Local-first on desktop, Postgres on Render (cloud deployment).
+    Desktop: always SQLite for speed; SyncManager syncs to Supabase in background.
+    Render: always Postgres since the server is co-located with Supabase."""
+    global _portal_pg_pool, _portal_pool_failed
+    
     database_url = os.getenv('DATABASE_URL')
-    # Ensure sslmode is set for Supabase
-    if database_url and 'sslmode' not in database_url:
-        separator = '&' if '?' in database_url else '?'
-        database_url = database_url + separator + 'sslmode=require'
+    is_server_deploy = os.getenv('RENDER') or os.getenv('IS_SERVER')
     
-    # Removed IPv4 replacement hack to ensure SNI works with Supabase Pooler
-    
-    # Check if we're in a cooldown period after a cloud failure
-    cloud_in_cooldown = (time.time() - _portal_cloud_fail_time) < _PORTAL_CLOUD_RETRY_COOLDOWN if _portal_cloud_fail_time else False
-    
-    if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db() and not cloud_in_cooldown:
-        # Initialize pool once (skip if already failed during cooldown)
+    # On Render (cloud deployment), use Postgres directly — low latency, no local state needed
+    if is_server_deploy and database_url and POSTGRES_AVAILABLE:
+        if database_url and 'sslmode' not in database_url:
+            separator = '&' if '?' in database_url else '?'
+            database_url = database_url + separator + 'sslmode=require'
+        
+        # Initialize pool once
         if _portal_pg_pool is None and not _portal_pool_failed:
             with _portal_pool_lock:
                 if _portal_pg_pool is None and not _portal_pool_failed:
@@ -685,29 +678,26 @@ def get_db_connection(local_db_name):
                             dsn=database_url,
                             connect_timeout=10
                         )
-                        print("[OK] Portal: Connection pool initialized (2-20 connections)")
+                        print("[OK] Portal (Render): Connection pool initialized")
                     except Exception as e:
                         _portal_pool_failed = True
-                        print(f"[WARNING] Portal: Pool init failed ({e}). Will try direct connections.")
+                        print(f"[WARNING] Portal: Pool init failed ({e})")
         
-        # Get connection from pool
         if _portal_pg_pool:
             try:
                 conn = _portal_pg_pool.getconn()
                 conn.autocommit = False
                 return PostgresConnectionWrapper(conn, pool=_portal_pg_pool)
-            except Exception as e:
-                print(f"[WARNING] Portal: Pool connection failed ({e}). Trying direct.")
+            except Exception:
+                pass
         
-        # Fallback: direct connection
         try:
             conn = psycopg2.connect(database_url, connect_timeout=10)
             return PostgresConnectionWrapper(conn)
         except Exception as e:
-            _portal_cloud_fail_time = time.time()
-            print(f"[WARNING] Portal: Cloud DB unreachable ({e}). Using SQLite for {_PORTAL_CLOUD_RETRY_COOLDOWN}s.")
-            
-    # Local SQLite fallback
+            print(f"[WARNING] Portal: Cloud DB unreachable ({e}). Falling back to SQLite.")
+    
+    # Desktop / local: always use SQLite for instant response
     if local_db_name == 'library.db':
         db_path = os.path.join(os.path.dirname(BASE_DIR), 'library.db')
     else:
