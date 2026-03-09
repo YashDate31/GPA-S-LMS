@@ -42,6 +42,9 @@ class PostgresRow:
         # sqlite3.Row iterates over values
         return iter(self._values)
 
+    def __len__(self):
+        return len(self._values)
+
 class PostgresCursorWrapper:
     """
     Wrapper to make psycopg2 cursor behave like sqlite3 cursor.
