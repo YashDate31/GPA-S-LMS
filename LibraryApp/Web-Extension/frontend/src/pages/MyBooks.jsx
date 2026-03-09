@@ -51,7 +51,7 @@ export default function MyBooks() {
           try {
             let d = typeof r.details === 'string' ? JSON.parse(r.details) : r.details;
             if (typeof d === 'string') d = JSON.parse(d);
-            return d?.book_id;
+            return d?.accession_no || d?.book_id;
           } catch { return null; }
         })
         .filter(Boolean);
@@ -64,17 +64,18 @@ export default function MyBooks() {
   };
 
   const handleRenew = async (book) => {
-    setRenewingBookId(book.book_id);
+    const renewKey = book.accession_no || book.book_id;
+    setRenewingBookId(renewKey);
     setRenewError(null);
     setRenewSuccess(null);
     try {
       const res = await axios.post('/api/request', {
         type: 'renewal',
-        details: JSON.stringify({ book_id: book.book_id, title: book.title })
+        details: JSON.stringify({ book_id: book.book_id, accession_no: book.accession_no || book.book_id, title: book.title })
       });
       if (res.data.status === 'success') {
-        setRenewSuccess(book.book_id);
-        setPendingRenewals(prev => [...prev, book.book_id]);
+        setRenewSuccess(renewKey);
+        setPendingRenewals(prev => [...prev, renewKey]);
         setTimeout(() => setRenewSuccess(null), 3000);
       }
     } catch (err) {
@@ -273,12 +274,12 @@ export default function MyBooks() {
                                     {/* Renewal Button - only for active/overdue loans (not returned) */}
                                     {book.status !== 'returned' && book.book_id && (
                                         <div className="mt-1">
-                                            {renewSuccess === book.book_id ? (
+                                            {renewSuccess === (book.accession_no || book.book_id) ? (
                                                 <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 rounded-lg border border-emerald-200 dark:border-emerald-800">
                                                     <CheckCircle2 size={14} />
                                                     <span>Renewal request sent to librarian!</span>
                                                 </div>
-                                            ) : pendingRenewals.includes(book.book_id) ? (
+                                            ) : pendingRenewals.includes(book.accession_no || book.book_id) ? (
                                                 <div className="flex items-center justify-center gap-2 text-xs font-bold text-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800">
                                                     <Clock size={14} />
                                                     <span>Renewal Pending Approval</span>
@@ -286,10 +287,10 @@ export default function MyBooks() {
                                             ) : (
                                                 <button
                                                     onClick={() => handleRenew(book)}
-                                                    disabled={renewingBookId === book.book_id}
+                                                    disabled={renewingBookId === (book.accession_no || book.book_id)}
                                                     className="w-full flex items-center justify-center gap-2 text-xs font-bold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800 transition-all disabled:opacity-50 cursor-pointer"
                                                 >
-                                                    {renewingBookId === book.book_id ? (
+                                                    {renewingBookId === (book.accession_no || book.book_id) ? (
                                                         <><Loader2 size={14} className="animate-spin" /> Requesting...</>
                                                     ) : (
                                                         <><RefreshCw size={14} /> Request Renewal</>

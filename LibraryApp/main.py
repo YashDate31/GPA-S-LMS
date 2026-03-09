@@ -4725,8 +4725,8 @@ Current Settings:
             cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE status = 'borrowed'")
             borrowed_books = cursor.fetchone()[0]
             
-            # Total students (Computer department only)
-            cursor.execute("SELECT COUNT(*) FROM students WHERE department = 'Computer'")
+            # Total students
+            cursor.execute("SELECT COUNT(*) FROM students")
             total_students = cursor.fetchone()[0]
             
             conn.close()
@@ -14193,8 +14193,19 @@ Note: This is an automated email. Please find the attached formal overdue letter
         
         # Details
         details = req_data.get('details', {})
+        req_type = req_data.get('request_type', '')
         if isinstance(details, dict):
-            detail_text = ', '.join([f"{k}: {v}" for k, v in details.items() if v])
+            if req_type == 'renewal':
+                # Show clean format for renewal: "Book Title (Copy: 708)"
+                title_val = details.get('title', '')
+                accession = details.get('accession_no', details.get('book_id', ''))
+                detail_text = f"Book: {title_val}" if title_val else ''
+                if accession and accession != details.get('book_id', ''):
+                    detail_text += f" (Copy: {accession})"
+                elif accession:
+                    detail_text += f" (ID: {accession})"
+            else:
+                detail_text = ', '.join([f"{k}: {v}" for k, v in details.items() if v])
         else:
             detail_text = str(details)
         
@@ -14315,8 +14326,18 @@ Note: This is an automated email. Please find the attached formal overdue letter
         
         # Details
         details = req_data.get('details', {})
+        req_type = req_data.get('request_type', '')
         if isinstance(details, dict):
-            detail_text = ', '.join([f"{k}: {v}" for k, v in details.items() if v])
+            if req_type == 'renewal':
+                title_val = details.get('title', '')
+                accession = details.get('accession_no', details.get('book_id', ''))
+                detail_text = f"Book: {title_val}" if title_val else ''
+                if accession and accession != details.get('book_id', ''):
+                    detail_text += f" (Copy: {accession})"
+                elif accession:
+                    detail_text += f" (ID: {accession})"
+            else:
+                detail_text = ', '.join([f"{k}: {v}" for k, v in details.items() if v])
         else:
             detail_text = str(details)
         
@@ -14961,7 +14982,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
         if action == 'approve':
             if not messagebox.askyesno("Confirm Deletion", 
                 f"Are you sure you want to approve the deletion request for {student_name}?\n\n"
-                "This will remove their portal authentication."):
+                "This will remove the student from the library system,\n"
+                "return any borrowed books, and delete their portal access."):
                 return
         
         try:
@@ -14975,6 +14997,9 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 if result.get('status') == 'success':
                     messagebox.showinfo("Success", result.get('message', f"Deletion {action}d!"))
                     self._refresh_deletion_requests()
+                    # Refresh students list since student was removed from library DB
+                    if action == 'approve':
+                        self.refresh_students()
                 else:
                     messagebox.showerror("Error", result.get('message', 'Action failed'))
         except Exception as e:

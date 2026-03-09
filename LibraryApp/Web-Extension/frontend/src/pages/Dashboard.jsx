@@ -77,11 +77,11 @@ export default function Dashboard({ user }) {
   const activeBorrows = data.borrows || [];
 
   const handleRenew = async (book) => {
-    setRenewingBookId(book.book_id);
+    setRenewingBookId(book.accession_no || book.book_id);
     try {
       await axios.post('/api/request', {
         type: 'renewal',
-        details: JSON.stringify({ book_id: book.book_id, title: book.title })
+        details: JSON.stringify({ book_id: book.book_id, accession_no: book.accession_no || book.book_id, title: book.title })
       });
       alert('Renewal request sent to librarian for approval.');
       fetchData();
