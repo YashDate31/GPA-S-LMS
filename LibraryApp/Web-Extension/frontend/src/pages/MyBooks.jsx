@@ -31,6 +31,7 @@ export default function MyBooks() {
   const [renewingBookId, setRenewingBookId] = useState(null);
   const [renewSuccess, setRenewSuccess] = useState(null);
   const [renewError, setRenewError] = useState(null);
+  const [pendingRenewals, setPendingRenewals] = useState([]);
 
   useEffect(() => {
     fetchData();
@@ -38,8 +39,23 @@ export default function MyBooks() {
 
   const fetchData = async () => {
     try {
-      const { data } = await axios.get('/api/dashboard');
-      setData({ borrows: data.borrows || [], history: data.history || [] });
+      const [dashRes, reqRes] = await Promise.all([
+        axios.get('/api/dashboard'),
+        axios.get('/api/requests')
+      ]);
+      setData({ borrows: dashRes.data.borrows || [], history: dashRes.data.history || [] });
+      // Track which books have pending renewal requests
+      const pending = (reqRes.data.requests || [])
+        .filter(r => r.request_type === 'renewal' && r.status === 'pending')
+        .map(r => {
+          try {
+            let d = typeof r.details === 'string' ? JSON.parse(r.details) : r.details;
+            if (typeof d === 'string') d = JSON.parse(d);
+            return d?.book_id;
+          } catch { return null; }
+        })
+        .filter(Boolean);
+      setPendingRenewals(pending);
     } catch (e) {
       console.error(e);
     } finally {
@@ -52,17 +68,18 @@ export default function MyBooks() {
     setRenewError(null);
     setRenewSuccess(null);
     try {
-      const res = await axios.post('/api/renew', {
-        book_id: book.book_id
+      const res = await axios.post('/api/request', {
+        type: 'renewal',
+        details: JSON.stringify({ book_id: book.book_id, title: book.title })
       });
       if (res.data.status === 'success') {
         setRenewSuccess(book.book_id);
+        setPendingRenewals(prev => [...prev, book.book_id]);
         setTimeout(() => setRenewSuccess(null), 3000);
-        // Refresh data to show updated due date
-        fetchData();
       }
     } catch (err) {
-      setRenewError(err.response?.data?.message || 'Failed to renew');
+      const msg = err.response?.data?.error || err.response?.data?.message || 'Failed to submit renewal request';
+      setRenewError(msg);
       setTimeout(() => setRenewError(null), 3000);
     } finally {
       setRenewingBookId(null);
@@ -259,7 +276,12 @@ export default function MyBooks() {
                                             {renewSuccess === book.book_id ? (
                                                 <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 rounded-lg border border-emerald-200 dark:border-emerald-800">
                                                     <CheckCircle2 size={14} />
-                                                    <span>Due date extended by 2 days!</span>
+                                                    <span>Renewal request sent to librarian!</span>
+                                                </div>
+                                            ) : pendingRenewals.includes(book.book_id) ? (
+                                                <div className="flex items-center justify-center gap-2 text-xs font-bold text-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800">
+                                                    <Clock size={14} />
+                                                    <span>Renewal Pending Approval</span>
                                                 </div>
                                             ) : (
                                                 <button
@@ -268,9 +290,9 @@ export default function MyBooks() {
                                                     className="w-full flex items-center justify-center gap-2 text-xs font-bold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800 transition-all disabled:opacity-50 cursor-pointer"
                                                 >
                                                     {renewingBookId === book.book_id ? (
-                                                        <><Loader2 size={14} className="animate-spin" /> Renewing...</>
+                                                        <><Loader2 size={14} className="animate-spin" /> Requesting...</>
                                                     ) : (
-                                                        <><RefreshCw size={14} /> Renew (+2 days)</>
+                                                        <><RefreshCw size={14} /> Request Renewal</>
                                                     )}
                                                 </button>
                                             )}
