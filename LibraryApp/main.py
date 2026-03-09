@@ -681,23 +681,18 @@ class LibraryApp:
                     batch_size=self.config_manager.get_email_config()['batch_size']
                 )
                 
-                # Setup Sync Manager for Dual-DB Architecture
+                # Setup Sync Manager for Local-First + Cloud Sync Architecture
                 self.sync_manager = create_sync_manager(self.db)
 
                 if self.sync_manager:
-                    # Sync interval defaults to 15 minutes unless overridden
-                    sync_interval = 15 
+                    # Sync interval: 5 minutes keeps cloud reasonably fresh
+                    sync_interval = 5 
                     if hasattr(self.config_manager, 'get_sync_interval'):
                         sync_interval = self.config_manager.get_sync_interval()
                     
-                    # Start the background daemon
+                    # Start the background daemon (does initial pull + periodic bidirectional sync)
                     self.sync_manager.auto_sync_daemon(sync_interval)
-                    print(f"[OK] Background Sync Daemon started (interval: {sync_interval} minutes)")
-                    
-                    if self.db.use_cloud:
-                        print("   -> Syncing Supabase changes DOWN to local SQLite for offline fallback.")
-                    else:
-                        print("   -> Syncing local SQLite offline changes UP to Supabase.")
+                    print(f"[OK] Local-first mode: SQLite primary, Supabase sync every {sync_interval} min")
 
                 print(f"[OK] Performance optimization modules loaded successfully")
             except Exception as e:
@@ -13802,8 +13797,11 @@ Note: This is an automated email. Please find the attached formal overdue letter
         # Store all requests for filtering
         self.all_pending_requests = []
         
-        # Load requests
-        self._refresh_portal_requests()
+        # Delay initial load to allow Waitress server to start (race condition fix)
+        self.root.after(3000, self._refresh_portal_requests)
+        
+        # Auto-refresh every 30 seconds so new web-portal requests appear
+        self.root.after(30000, self._start_requests_auto_refresh)
     
     def _set_request_type_filter(self, type_key):
         """Set the active request type filter and update tab styling"""
@@ -14004,7 +14002,20 @@ Note: This is an automated email. Please find the attached formal overdue letter
                     
         except Exception as e:
             self._show_empty_message(self.requests_container, "Could not load requests", f"Portal server may not be running.\n{str(e)}")
-    
+
+    def _start_requests_auto_refresh(self):
+        """Periodically poll the portal API so new requests appear automatically"""
+        if not WEB_PORTAL_AVAILABLE:
+            return
+        # Only refresh if we're NOT in history mode
+        if hasattr(self, 'show_request_history') and not self.show_request_history.get():
+            try:
+                self._refresh_portal_requests()
+            except Exception:
+                pass
+        # Schedule next poll in 30 seconds
+        self.root.after(30000, self._start_requests_auto_refresh)
+
     def _toggle_request_history(self):
         """Toggle between pending requests and history view"""
         current = self.show_request_history.get()
@@ -14588,8 +14599,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
         # Store the bind function for later use when adding cards
         self._bind_deletion_mousewheel = bind_mousewheel_recursive
         
-        # Load
-        self._refresh_deletion_requests()
+        # Delay initial load to allow Waitress server to start
+        self.root.after(3500, self._refresh_deletion_requests)
     
     def _refresh_deletion_requests(self):
         """Fetch and display deletion requests in two-column layout"""
@@ -15289,8 +15300,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
         self.recent_resets_container = tk.Frame(right_card, bg='#f8fafc')
         self.recent_resets_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
         
-        # Load initial stats
-        self._refresh_auth_stats()
+        # Delay initial stats load for server startup
+        self.root.after(4000, self._refresh_auth_stats)
     
     def _handle_password_reset(self):
         """Handle password reset action"""
