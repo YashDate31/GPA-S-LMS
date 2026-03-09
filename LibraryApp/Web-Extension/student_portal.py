@@ -2371,34 +2371,47 @@ def api_submit_request():
     if not req_type or not details:
         return jsonify({'error': 'Missing data'}), 400
 
-    # Prevent duplicate pending renewal requests for the same book
+    # Intercept renewal requests → auto-renew (no librarian approval needed)
     if req_type == 'renewal':
         try:
             parsed = json.loads(details) if isinstance(details, str) else details
-            dup_book_id = parsed.get('book_id') if isinstance(parsed, dict) else None
+            book_id = parsed.get('book_id') if isinstance(parsed, dict) else None
         except:
-            dup_book_id = None
-        if dup_book_id:
-            conn_dup = get_portal_db()
-            cur_dup = conn_dup.cursor()
-            cur_dup.execute(
-                "SELECT details FROM requests WHERE enrollment_no = ? AND request_type = 'renewal' AND status = 'pending'",
-                (session['student_id'],)
-            )
-            for row in cur_dup.fetchall():
+            book_id = None
+        if book_id:
+            # Delegate to auto-renew logic
+            enrollment = session['student_id']
+            try:
+                conn_r = get_library_db()
+                cur_r = conn_r.cursor()
+                cur_r.execute(
+                    "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
+                    (book_id, enrollment)
+                )
+                record = cur_r.fetchone()
+                if not record:
+                    conn_r.close()
+                    return jsonify({'status': 'error', 'message': 'No active loan found'}), 404
+                current_due = record['due_date']
                 try:
-                    existing_details = row['details']
-                    # details may be double-JSON-encoded
-                    if isinstance(existing_details, str):
-                        existing_details = json.loads(existing_details)
-                    if isinstance(existing_details, str):
-                        existing_details = json.loads(existing_details)
-                    if isinstance(existing_details, dict) and existing_details.get('book_id') == dup_book_id:
-                        conn_dup.close()
-                        return jsonify({'error': 'A renewal request for this book is already pending.'}), 409
-                except:
-                    continue
-            conn_dup.close()
+                    due_d = datetime.strptime(str(current_due), '%Y-%m-%d')
+                except Exception:
+                    due_d = datetime.now()
+                new_due = due_d + timedelta(days=2)
+                new_due_str = new_due.strftime('%Y-%m-%d')
+                cur_r.execute(
+                    "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                    (new_due_str, book_id, enrollment)
+                )
+                conn_r.commit()
+                conn_r.close()
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Due date extended to {new_due.strftime("%d %b %Y")}',
+                    'new_due_date': new_due_str
+                })
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': f'Renewal failed: {str(e)}'}), 500
 
     try:
         conn = get_portal_db()
