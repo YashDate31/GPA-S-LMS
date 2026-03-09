@@ -79,13 +79,15 @@ export default function Dashboard({ user }) {
   const handleRenew = async (book) => {
     setRenewingBookId(book.book_id);
     try {
-      await axios.post('/api/request', {
-        type: 'renewal',
-        details: JSON.stringify({ book_id: book.book_id, title: book.title, due_date: book.due_date })
+      const res = await axios.post('/api/renew', {
+        book_id: book.book_id
       });
-      alert('Renewal request submitted successfully!');
+      if (res.data.status === 'success') {
+        alert(res.data.message);
+        fetchData();
+      }
     } catch (e) {
-      const msg = e.response?.data?.error || 'Failed to submit renewal request';
+      const msg = e.response?.data?.message || 'Failed to renew';
       alert(msg);
     } finally {
       setRenewingBookId(null);

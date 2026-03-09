@@ -52,20 +52,17 @@ export default function MyBooks() {
     setRenewError(null);
     setRenewSuccess(null);
     try {
-      const res = await axios.post('/api/request', {
-        type: 'renewal',
-        details: {
-          book_id: book.book_id,
-          title: book.title,
-          due_date: book.due_date
-        }
+      const res = await axios.post('/api/renew', {
+        book_id: book.book_id
       });
       if (res.data.status === 'success') {
         setRenewSuccess(book.book_id);
         setTimeout(() => setRenewSuccess(null), 3000);
+        // Refresh data to show updated due date
+        fetchData();
       }
     } catch (err) {
-      setRenewError(err.response?.data?.error || 'Failed to submit renewal request');
+      setRenewError(err.response?.data?.message || 'Failed to renew');
       setTimeout(() => setRenewError(null), 3000);
     } finally {
       setRenewingBookId(null);
@@ -262,7 +259,7 @@ export default function MyBooks() {
                                             {renewSuccess === book.book_id ? (
                                                 <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 rounded-lg border border-emerald-200 dark:border-emerald-800">
                                                     <CheckCircle2 size={14} />
-                                                    <span>Renewal request sent!</span>
+                                                    <span>Due date extended by 2 days!</span>
                                                 </div>
                                             ) : (
                                                 <button
@@ -271,9 +268,9 @@ export default function MyBooks() {
                                                     className="w-full flex items-center justify-center gap-2 text-xs font-bold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800 transition-all disabled:opacity-50 cursor-pointer"
                                                 >
                                                     {renewingBookId === book.book_id ? (
-                                                        <><Loader2 size={14} className="animate-spin" /> Requesting...</>
+                                                        <><Loader2 size={14} className="animate-spin" /> Renewing...</>
                                                     ) : (
-                                                        <><RefreshCw size={14} /> Request Renewal</>
+                                                        <><RefreshCw size={14} /> Renew (+2 days)</>
                                                     )}
                                                 </button>
                                             )}

@@ -12,6 +12,7 @@ except ImportError:
 # Try importing psycopg2 for PostgreSQL support
 try:
     import psycopg2
+    import psycopg2.pool
     from psycopg2.extras import RealDictCursor
     POSTGRES_AVAILABLE = True
 except ImportError:
@@ -46,8 +47,9 @@ class PostgresCursorWrapper:
     - Replaces '?' placeholders with '%s' safely for this specific application context.
     - Supports row_factory style access (dict-like)
     """
-    def __init__(self, cursor):
+    def __init__(self, cursor, conn=None):
         self.cursor = cursor
+        self._conn = conn
         self.rowcount = -1
 
     def execute(self, sql, params=None):
@@ -56,6 +58,8 @@ class PostgresCursorWrapper:
         # In a generic library, this would be unsafe (e.g., "SELECT 'Where is he?'").
         # For this Application, we verify that no static SQL contains '?' literals.
         pg_sql = sql.replace('?', '%s')
+        # Convert SQLite-specific functions to PostgreSQL equivalents
+        pg_sql = pg_sql.replace('INSTR(', 'STRPOS(').replace('instr(', 'strpos(')
         
         try:
             if params:
@@ -68,6 +72,12 @@ class PostgresCursorWrapper:
             # Log error for debugging
             print(f"SQL Error in PostgresWrapper: {e}")
             print(f"Query: {pg_sql}")
+            # Rollback to clear the aborted transaction state
+            if self._conn:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
             raise e
 
     def fetchone(self):
@@ -83,17 +93,32 @@ class PostgresCursorWrapper:
 
 class PostgresConnectionWrapper:
     """Wrapper for Postgres connection to mimic sqlite3 connection"""
-    def __init__(self, conn):
+    def __init__(self, conn, pool=None):
         self.conn = conn
+        self._pool = pool  # Reference to pool for returning connection
     
     def cursor(self):
-        return PostgresCursorWrapper(self.conn.cursor(cursor_factory=RealDictCursor))
+        return PostgresCursorWrapper(self.conn.cursor(cursor_factory=RealDictCursor), self.conn)
     
     def commit(self):
         self.conn.commit()
     
     def close(self):
-        self.conn.close()
+        if self._pool:
+            # Return connection to pool instead of closing
+            try:
+                self.conn.reset()  # Clear any in-progress transaction
+            except Exception:
+                pass
+            try:
+                self._pool.putconn(self.conn)
+            except Exception:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+        else:
+            self.conn.close()
         
     def execute(self, sql, params=None):
         # Shortcut execute support
@@ -103,10 +128,42 @@ class PostgresConnectionWrapper:
 
 
 class Database:
+    @staticmethod
+    def _force_ipv4_url(url):
+        """Resolve hostname to IPv4 to avoid IPv6 timeout issues with Supabase."""
+        try:
+            import socket
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            if hostname and not hostname.replace('.', '').isdigit():
+                # Resolve to IPv4 only
+                ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+                # Replace hostname with IPv4 in the URL, preserve port
+                if parsed.port:
+                    new_netloc = parsed.netloc.replace(hostname, ipv4)
+                else:
+                    new_netloc = parsed.netloc.replace(hostname, ipv4)
+                new_url = urlunparse(parsed._replace(netloc=new_netloc))
+                print(f"[OK] Database: Resolved {hostname} -> {ipv4} (IPv4)")
+                return new_url
+        except Exception as e:
+            print(f"[WARNING] Database: IPv4 resolution failed ({e}), using original URL")
+        return url
+
     def __init__(self, force_local=False):
         # By default, we DO NOT force local anymore. We want Supabase first!
         
         self.database_url = os.getenv('DATABASE_URL')
+        # Ensure sslmode is set for Supabase
+        if self.database_url and 'sslmode' not in self.database_url:
+            separator = '&' if '?' in self.database_url else '?'
+            self.database_url = self.database_url + separator + 'sslmode=require'
+        
+        # Force IPv4 to avoid IPv6 timeout issues with Supabase
+        if self.database_url:
+            self.database_url = self._force_ipv4_url(self.database_url)
+        
         self.db_path = ""
         
         # Determine local DB path
@@ -138,19 +195,43 @@ class Database:
                 elif not self.database_url:
                     print("[WARNING] Database: No DATABASE_URL found. Using LOCAL SQLite.")
             
+        # Initialize connection pool for PostgreSQL
+        self._pg_pool = None
+        if self.use_cloud:
+            try:
+                self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=2, maxconn=15,
+                    dsn=self.database_url,
+                    connect_timeout=5
+                )
+                print("[OK] Database: Connection pool initialized (2-15 connections)")
+            except Exception as e:
+                print(f"[WARNING] Connection pool init failed: {e}. Will use direct connections.")
+                self._pg_pool = None
+
         self.init_database()
     
     def get_connection(self):
         if self.use_cloud:
+            # Use connection pool if available
+            if self._pg_pool:
+                try:
+                    conn = self._pg_pool.getconn()
+                    conn.autocommit = False
+                    return PostgresConnectionWrapper(conn, pool=self._pg_pool)
+                except Exception as e:
+                    print(f"Pool connection failed: {e}. Trying direct connection.")
+            # Fallback to direct connection
             try:
-                conn = psycopg2.connect(self.database_url)
+                conn = psycopg2.connect(self.database_url, connect_timeout=5)
                 return PostgresConnectionWrapper(conn)
             except Exception as e:
-                print(f"Cloud DB Connection Failed: {e}. Falling back to clean State if possible, or erroring.")
-                # We might want to fallback? But 'Hybrid' implies syncing.
-                # For this request, "If DATABASE_URL is missing, fall back". 
-                # If present but fails, we usually error out.
-                raise e
+                print(f"Cloud DB Connection Failed: {e}. Falling back to local SQLite.")
+                # Fall back to local SQLite silently
+                conn = sqlite3.connect(self.db_path)
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA foreign_keys = ON')
+                return conn
         else:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row

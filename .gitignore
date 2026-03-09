@@ -32,8 +32,9 @@ email_history.json
 # Node modules
 node_modules/
 
-# Frontend build output (generated from source)
-LibraryApp/Web-Extension/frontend/dist/
+# Frontend build output - tracked on deployment branch for Render
+!LibraryApp/Web-Extension/frontend/dist/
+!LibraryApp/Web-Extension/frontend/dist/**
 
 # Uploaded files
 LibraryApp/Web-Extension/uploads/registration_photos/*
@@ -45,6 +46,10 @@ LibraryApp/Web-Extension/uploads/study_materials/*
 LibraryApp/email_settings.json
 LibraryApp/library_settings.json
 LibraryApp/app_config.json
+
+# Environment files
+.env
+.env.*
 
 # Secret keys
 *.secret_key
