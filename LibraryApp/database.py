@@ -760,13 +760,13 @@ class Database:
             if not result or result[0] <= 0:
                 return False, "Book not available"
 
-            # Check if this student already has this book borrowed (not yet returned)
+            # Check if this student already has this exact copy borrowed (not yet returned)
             cursor.execute(
-                "SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
-                (enrollment_no, book_id)
+                "SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'",
+                (enrollment_no, original_book_id)
             )
             if cursor.fetchone()[0] > 0:
-                return False, "This student already has this book borrowed. It must be returned before borrowing again."
+                return False, "This student already has this exact copy borrowed. It must be returned before borrowing again."
             
             # Check max books per student limit (enforced at database level for consistency)
             cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'", (enrollment_no,))

@@ -105,6 +105,29 @@ def _is_postgres_connection(conn) -> bool:
         return False
 
 
+def _push_to_cloud(sql, params=None):
+    """Fire-and-forget: replicate a write to Supabase in a background thread.
+    Used by student_portal endpoints that modify library data on desktop (local SQLite)
+    to keep Supabase in sync for the web portal on Render."""
+    database_url = os.getenv('DATABASE_URL')
+    if not database_url or not POSTGRES_AVAILABLE:
+        return
+    # Don't push if we're already on Render (writes go directly to Postgres)
+    if os.getenv('RENDER') or os.getenv('IS_SERVER'):
+        return
+    def _do_push():
+        try:
+            pg_sql = sql.replace('?', '%s')
+            conn = psycopg2.connect(database_url, connect_timeout=5)
+            cur = conn.cursor()
+            cur.execute(pg_sql, params)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[Portal Cloud Push] Failed (sync will catch up): {e}")
+    threading.Thread(target=_do_push, daemon=True).start()
+
+
 def _requests_pk_column(conn) -> str:
     """Return the primary key column for the requests table ('req_id' or legacy 'id')."""
     try:
@@ -1909,7 +1932,7 @@ def api_dashboard():
     
     # Active Loans
     cursor.execute("""
-        SELECT b.title, b.author, br.borrow_date, br.due_date, br.book_id
+        SELECT b.title, b.author, br.borrow_date, br.due_date, br.book_id, br.accession_no
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ? AND br.status = 'borrowed'
@@ -2341,14 +2364,14 @@ def api_submit_request():
     if not req_type or not details:
         return jsonify({'error': 'Missing data'}), 400
 
-    # Prevent duplicate pending renewal requests for the same book
+    # Prevent duplicate pending renewal requests for the same book copy
     if req_type == 'renewal':
         try:
             parsed = json.loads(details) if isinstance(details, str) else details
-            dup_book_id = parsed.get('book_id') if isinstance(parsed, dict) else None
+            dup_accession = parsed.get('accession_no') if isinstance(parsed, dict) else None
         except:
-            dup_book_id = None
-        if dup_book_id:
+            dup_accession = None
+        if dup_accession:
             conn_dup = get_portal_db()
             cur_dup = conn_dup.cursor()
             cur_dup.execute(
@@ -2362,7 +2385,7 @@ def api_submit_request():
                         existing_details = json.loads(existing_details)
                     if isinstance(existing_details, str):
                         existing_details = json.loads(existing_details)
-                    if isinstance(existing_details, dict) and existing_details.get('book_id') == dup_book_id:
+                    if isinstance(existing_details, dict) and existing_details.get('accession_no') == dup_accession:
                         conn_dup.close()
                         return jsonify({'error': 'A renewal request for this book is already pending.'}), 409
                 except:
@@ -3018,11 +3041,20 @@ def api_admin_approve_request(req_id):
                 conn_lib = get_library_db()
                 cursor_lib = conn_lib.cursor()
                 
+                # Get accession_no if provided (targets specific copy)
+                renewal_accession = details_parsed.get('accession_no') if isinstance(details_parsed, dict) else None
+                
                 # Get current due date and extend by loan period (default 7 days)
-                cursor_lib.execute(
-                    "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
-                    (renewal_book_id, req['enrollment_no'])
-                )
+                if renewal_accession:
+                    cursor_lib.execute(
+                        "SELECT due_date FROM borrow_records WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
+                        (renewal_accession, req['enrollment_no'])
+                    )
+                else:
+                    cursor_lib.execute(
+                        "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
+                        (renewal_book_id, req['enrollment_no'])
+                    )
                 borrow_record = cursor_lib.fetchone()
                 
                 if borrow_record and borrow_record['due_date']:
@@ -3035,10 +3067,25 @@ def api_admin_approve_request(req_id):
                     extend_from = max(current_due, datetime.now())
                     new_due_date = extend_from + timedelta(days=7)
                     
-                    cursor_lib.execute(
-                        "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
-                        (new_due_date.strftime('%Y-%m-%d'), renewal_book_id, req['enrollment_no'])
-                    )
+                    # Update only the specific copy if accession_no is known
+                    if renewal_accession:
+                        cursor_lib.execute(
+                            "UPDATE borrow_records SET due_date = ? WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (new_due_date.strftime('%Y-%m-%d'), renewal_accession, req['enrollment_no'])
+                        )
+                        _push_to_cloud(
+                            "UPDATE borrow_records SET due_date = ? WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (new_due_date.strftime('%Y-%m-%d'), renewal_accession, req['enrollment_no'])
+                        )
+                    else:
+                        cursor_lib.execute(
+                            "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (new_due_date.strftime('%Y-%m-%d'), renewal_book_id, req['enrollment_no'])
+                        )
+                        _push_to_cloud(
+                            "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (new_due_date.strftime('%Y-%m-%d'), renewal_book_id, req['enrollment_no'])
+                        )
                     conn_lib.commit()
                 conn_lib.close()
         except Exception as e:
@@ -3220,17 +3267,67 @@ def api_admin_approve_deletion(del_id):
     # Update status
     cursor.execute("UPDATE deletion_requests SET status = 'approved' WHERE id = ?", (del_id,))
     
-    # Also clean up auth record
+    # Clean up auth record so student cannot log in
     cursor.execute("DELETE FROM student_auth WHERE enrollment_no = ?", (student_id,))
+    
+    # Clean up portal requests and notifications
+    try:
+        cursor.execute("DELETE FROM requests WHERE enrollment_no = ?", (student_id,))
+    except Exception:
+        pass
+    try:
+        cursor.execute("DELETE FROM user_notifications WHERE enrollment_no = ?", (student_id,))
+    except Exception:
+        pass
+    try:
+        cursor.execute("DELETE FROM user_settings WHERE enrollment_no = ?", (student_id,))
+    except Exception:
+        pass
+    
     conn.commit()
     conn.close()
     
-    # Note: Actual student deletion from main DB should be done via the main app
-    # This just marks the request as approved
+    # Delete student from the MAIN library database
+    try:
+        conn_lib = get_library_db()
+        cursor_lib = conn_lib.cursor()
+        
+        # Return any borrowed books (mark as returned)
+        cursor_lib.execute(
+            "UPDATE borrow_records SET status = 'returned', return_date = ? WHERE enrollment_no = ? AND status = 'borrowed'",
+            (datetime.now().strftime('%Y-%m-%d'), student_id)
+        )
+        
+        # Update available copies for returned books
+        cursor_lib.execute(
+            "SELECT book_id FROM borrow_records WHERE enrollment_no = ? AND return_date = ?",
+            (student_id, datetime.now().strftime('%Y-%m-%d'))
+        )
+        returned_books = cursor_lib.fetchall()
+        for book_row in returned_books:
+            cursor_lib.execute(
+                "UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?",
+                (book_row['book_id'],)
+            )
+        
+        # Delete the student record
+        cursor_lib.execute("DELETE FROM students WHERE enrollment_no = ?", (student_id,))
+        conn_lib.commit()
+        conn_lib.close()
+        
+        # Push changes to cloud
+        today = datetime.now().strftime('%Y-%m-%d')
+        _push_to_cloud(
+            "UPDATE borrow_records SET status = 'returned', return_date = ? WHERE enrollment_no = ? AND status = 'borrowed'",
+            (today, student_id)
+        )
+        _push_to_cloud("DELETE FROM students WHERE enrollment_no = ?", (student_id,))
+    except Exception as e:
+        print(f"[Deletion] Error removing student from library DB: {e}")
     
     return jsonify({
         'status': 'success', 
-        'message': 'Deletion approved. Student auth removed.',
+        'message': 'Deletion approved. Student removed from library system.',
         'student_id': student_id
     })
 
