@@ -323,9 +323,20 @@ export default function Dashboard({ user }) {
                      <div>
                        <p className="font-semibold text-slate-800 dark:text-white capitalize">{req.request_type.replace('_', ' ')}</p>
                        <p className="text-sm text-slate-500 dark:text-slate-400 truncate max-w-sm">
-                         {req.details && typeof req.details === 'string' && req.details.includes('{') 
-                           ? JSON.parse(req.details).title || JSON.parse(req.details).book_id || req.details 
-                           : req.details}
+                         {(() => {
+                           try {
+                             let parsed = req.details;
+                             if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+                             if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+                             if (typeof parsed === 'object' && parsed !== null) {
+                               if (req.request_type === 'renewal') return `Renewal for: ${parsed.title || parsed.book_id || 'Book'}`;
+                               if (req.request_type === 'book_request') return `Request for: ${parsed.title || parsed.book_id || 'Book'}`;
+                               if (req.request_type === 'profile_update') return `Profile Update: ${Object.keys(parsed).join(', ')}`;
+                               return parsed.title || parsed.book_id || JSON.stringify(parsed);
+                             }
+                             return String(parsed);
+                           } catch { return String(req.details); }
+                         })()}
                        </p>
                      </div>
                      <div className="flex items-center gap-3">
