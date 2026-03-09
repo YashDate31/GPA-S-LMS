@@ -679,16 +679,8 @@ def get_db_connection(local_db_name):
         if _portal_pg_pool is None and not _portal_pool_failed:
             with _portal_pool_lock:
                 if _portal_pg_pool is None and not _portal_pool_failed:
-                    try:
-                        _portal_pg_pool = psycopg2.pool.ThreadedConnectionPool(
-                            minconn=2, maxconn=20,
-                            dsn=database_url,
-                            connect_timeout=10
-                        )
-                        print("[OK] Portal: Connection pool initialized (2-20 connections)")
-                    except Exception as e:
-                        _portal_pool_failed = True
-                        print(f"[WARNING] Portal: Pool init failed ({e}). Will try direct connections.")
+                    # Disabled ThreadedConnectionPool to prevent SSL drops with Supabase pooler
+                    _portal_pool_failed = True
         
         # Get connection from pool
         if _portal_pg_pool:
