@@ -36,7 +36,7 @@ class AutocompleteEntry:
         self.entry.bind('<FocusOut>', lambda e: self._schedule_close())
         
     def _on_key_release(self, event):
-        """Handle key release - show suggestions"""
+        """Handle key release - show suggestions with debounce"""
         # Ignore navigation keys
         if event.keysym in ('Up', 'Down', 'Return', 'Escape', 'Left', 'Right', 'Home', 'End'):
             return
@@ -48,7 +48,18 @@ class AutocompleteEntry:
             self._close_dropdown(None)
             return
         
-        # Get suggestions
+        # Debounce: cancel previous scheduled search, wait 250ms before querying
+        if hasattr(self, '_debounce_id') and self._debounce_id:
+            self.entry.after_cancel(self._debounce_id)
+        self._debounce_id = self.entry.after(250, lambda: self._do_search(query))
+
+    def _do_search(self, query):
+        """Execute the actual search after debounce delay"""
+        # Verify the query still matches current entry text
+        current = self.entry.get().strip()
+        if current != query:
+            return
+        
         self.suggestions = self.data_callback(query)
         
         if self.suggestions:

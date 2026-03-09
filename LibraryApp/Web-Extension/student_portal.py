@@ -16,7 +16,12 @@ import subprocess
 from collections import defaultdict
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Try loading .env from multiple locations (repo root, parent, cwd)
+    _env_loaded = load_dotenv()  # cwd
+    if not _env_loaded:
+        _env_loaded = load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
+    if not _env_loaded:
+        _env_loaded = load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.env'))
 except ImportError:
     pass
 
@@ -25,6 +30,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from database import PostgresConnectionWrapper
     import psycopg2
+    import psycopg2.pool
     from psycopg2.extras import RealDictCursor
     POSTGRES_AVAILABLE = True
 except ImportError:
@@ -32,6 +38,13 @@ except ImportError:
     psycopg2 = None
     RealDictCursor = None
     POSTGRES_AVAILABLE = False
+
+# Global connection pool for PostgreSQL (portal)
+_portal_pg_pool = None
+_portal_pool_lock = threading.Lock()
+_portal_pool_failed = False  # Track if pool init already failed
+_portal_cloud_fail_time = 0  # Timestamp of last cloud failure (retry after cooldown)
+_PORTAL_CLOUD_RETRY_COOLDOWN = 60  # Retry cloud DB after 60 seconds
 
 
 # --- Configuration ---
@@ -176,6 +189,12 @@ def get_or_create_secret_key():
 app = Flask(__name__, static_folder='frontend/dist')
 app.secret_key = get_or_create_secret_key()
 
+# --- Startup diagnostics (visible in Render logs) ---
+print(f"[STARTUP] DATABASE_URL set: {bool(os.getenv('DATABASE_URL'))}")
+print(f"[STARTUP] POSTGRES_AVAILABLE (psycopg2 imported): {POSTGRES_AVAILABLE}")
+print(f"[STARTUP] BASE_DIR: {BASE_DIR}")
+print(f"[STARTUP] CWD: {os.getcwd()}")
+
 
 # --- Build / Version info (helps diagnose "server not updated") ---
 APP_START_TIME_UTC = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
@@ -220,6 +239,10 @@ def api_version():
         'app_version': APP_VERSION,
         'app_start_time_utc': APP_START_TIME_UTC,
         'pid': os.getpid(),
+        'database_url_set': bool(os.getenv('DATABASE_URL')),
+        'postgres_available': POSTGRES_AVAILABLE,
+        'pool_initialized': _portal_pg_pool is not None,
+        'pool_failed': _portal_pool_failed,
     }
 
     try:
@@ -631,27 +654,70 @@ def api_admin_observability():
         return jsonify({'status': 'error', 'message': 'Observability failed', 'error_id': error_id}), 500
 
 def get_db_connection(local_db_name):
-    """Generic connection factory: Postgres (if env) or Local SQLite"""
+    """Generic connection factory: Postgres pool (if env) or Local SQLite"""
+    global _portal_pg_pool, _portal_pool_failed, _portal_cloud_fail_time
+
     def _should_use_cloud_db() -> bool:
-        # Check if forced local
         force_local = os.getenv('PORTAL_FORCE_LOCAL', '').strip().lower() in ('1', 'true', 'yes')
         if force_local:
             return False
-
-        # Otherwise, if DATABASE_URL is present, we attempt cloud by default
         return True
 
     database_url = os.getenv('DATABASE_URL')
-    if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db():
+    # Ensure sslmode is set for Supabase
+    if database_url and 'sslmode' not in database_url:
+        separator = '&' if '?' in database_url else '?'
+        database_url = database_url + separator + 'sslmode=require'
+    
+    # Force IPv4 to avoid IPv6 timeout issues with Supabase
+    if database_url:
         try:
-            print(f"Portal: Testing connection to Cloud PostgreSQL (Supabase)...")
-            # 3 second timeout to prevent hanging on boot if internet is down
-            conn = psycopg2.connect(database_url, connect_timeout=3)
+            import socket
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(database_url)
+            hostname = parsed.hostname
+            if hostname and not hostname.replace('.', '').isdigit():
+                ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+                new_netloc = parsed.netloc.replace(hostname, ipv4)
+                database_url = urlunparse(parsed._replace(netloc=new_netloc))
+        except Exception:
+            pass  # Use original URL if resolution fails
+    
+    # Check if we're in a cooldown period after a cloud failure
+    cloud_in_cooldown = (time.time() - _portal_cloud_fail_time) < _PORTAL_CLOUD_RETRY_COOLDOWN if _portal_cloud_fail_time else False
+    
+    if database_url and POSTGRES_AVAILABLE and _should_use_cloud_db() and not cloud_in_cooldown:
+        # Initialize pool once (skip if already failed during cooldown)
+        if _portal_pg_pool is None and not _portal_pool_failed:
+            with _portal_pool_lock:
+                if _portal_pg_pool is None and not _portal_pool_failed:
+                    try:
+                        _portal_pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                            minconn=2, maxconn=20,
+                            dsn=database_url,
+                            connect_timeout=10
+                        )
+                        print("[OK] Portal: Connection pool initialized (2-20 connections)")
+                    except Exception as e:
+                        _portal_pool_failed = True
+                        print(f"[WARNING] Portal: Pool init failed ({e}). Will try direct connections.")
+        
+        # Get connection from pool
+        if _portal_pg_pool:
+            try:
+                conn = _portal_pg_pool.getconn()
+                conn.autocommit = False
+                return PostgresConnectionWrapper(conn, pool=_portal_pg_pool)
+            except Exception as e:
+                print(f"[WARNING] Portal: Pool connection failed ({e}). Trying direct.")
+        
+        # Fallback: direct connection
+        try:
+            conn = psycopg2.connect(database_url, connect_timeout=10)
             return PostgresConnectionWrapper(conn)
         except Exception as e:
-            print(f"[WARNING] Portal: Cloud DB Connection Error: {e}. Falling back to SQLite.")
-            # Fallback to local if connection fails
-            pass
+            _portal_cloud_fail_time = time.time()
+            print(f"[WARNING] Portal: Cloud DB unreachable ({e}). Using SQLite for {_PORTAL_CLOUD_RETRY_COOLDOWN}s.")
             
     # Local SQLite fallback
     if local_db_name == 'library.db':
@@ -1064,87 +1130,91 @@ def request_deletion():
 @app.route('/api/login', methods=['POST'])
 @rate_limit
 def api_login():
-    data = request.json
-    enrollment = data.get('enrollment_no', '').strip()
-    password = data.get('password', '').strip()
-    
-    if not enrollment:
-        return jsonify({'status': 'error', 'message': 'Enrollment number required'}), 400
-    
-    # 1. Check if student exists in MAIN DB (Read-Only)
-    conn_lib = get_library_db()
-    cursor_lib = conn_lib.cursor()
-    cursor_lib.execute("SELECT * FROM students WHERE enrollment_no = ?", (enrollment,))
-    student = cursor_lib.fetchone()
-    conn_lib.close()
-    
-    if not student:
-        return jsonify({'status': 'error', 'message': 'Student not found'}), 401
-    
-    # 2. Check Auth Status in PORTAL DB (Shadow Auth)
-    conn_portal = get_portal_db()
-    cursor_p = conn_portal.cursor()
-    cursor_p.execute("SELECT * FROM student_auth WHERE enrollment_no = ?", (enrollment,))
-    auth_record = cursor_p.fetchone()
-    
-    require_change = False
-    
-    if not auth_record:
-        # FIRST LOGIN ATTEMPT EVER for this user
-        # Default behavior: Password MUST be enrollment number
-        if password == enrollment:
-            # Create auth record with HASHED password
-            hashed_pw = generate_password_hash(enrollment)
-            cursor_p.execute("INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1)", 
-                             (enrollment, hashed_pw))
-            conn_portal.commit()
-            require_change = True
-        else:
-            conn_portal.close()
-            return jsonify({'status': 'error', 'message': 'Invalid password (First login? Use Enrollment No.)'}), 401
-    else:
-        # Existing auth record
-        stored_pw = auth_record['password']
+    try:
+        data = request.json
+        enrollment = data.get('enrollment_no', '').strip()
+        password = data.get('password', '').strip()
         
-        # 1. Try verifying hash
-        is_valid = False
-        try:
-            if check_password_hash(stored_pw, password):
-                is_valid = True
-        except:
-            # Not a hash (legacy plain text)
-            if stored_pw == password:
-                is_valid = True
-                # MIGRATION: Upgrade to hash immediatey
-                new_hash = generate_password_hash(password)
-                cursor_p.execute("UPDATE student_auth SET password = ? WHERE enrollment_no = ?", (new_hash, enrollment))
+        if not enrollment:
+            return jsonify({'status': 'error', 'message': 'Enrollment number required'}), 400
+        
+        # 1. Check if student exists in MAIN DB (Read-Only)
+        conn_lib = get_library_db()
+        cursor_lib = conn_lib.cursor()
+        cursor_lib.execute("SELECT * FROM students WHERE enrollment_no = ?", (enrollment,))
+        student = cursor_lib.fetchone()
+        conn_lib.close()
+        
+        if not student:
+            return jsonify({'status': 'error', 'message': 'Student not found'}), 401
+        
+        # 2. Check Auth Status in PORTAL DB (Shadow Auth)
+        conn_portal = get_portal_db()
+        cursor_p = conn_portal.cursor()
+        cursor_p.execute("SELECT * FROM student_auth WHERE enrollment_no = ?", (enrollment,))
+        auth_record = cursor_p.fetchone()
+        
+        require_change = False
+        
+        if not auth_record:
+            # FIRST LOGIN ATTEMPT EVER for this user
+            # Default behavior: Password MUST be enrollment number
+            if password == enrollment:
+                # Create auth record with HASHED password
+                hashed_pw = generate_password_hash(enrollment)
+                cursor_p.execute("INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1)", 
+                                 (enrollment, hashed_pw))
                 conn_portal.commit()
-        
-        if not is_valid:
-            conn_portal.close()
-            return jsonify({'status': 'error', 'message': 'Invalid password'}), 401
+                require_change = True
+            else:
+                conn_portal.close()
+                return jsonify({'status': 'error', 'message': 'Invalid password (First login? Use Enrollment No.)'}), 401
+        else:
+            # Existing auth record
+            stored_pw = auth_record['password']
             
-        if auth_record['is_first_login']:
-            require_change = True
+            # 1. Try verifying hash
+            is_valid = False
+            try:
+                if check_password_hash(stored_pw, password):
+                    is_valid = True
+            except:
+                # Not a hash (legacy plain text)
+                if stored_pw == password:
+                    is_valid = True
+                    # MIGRATION: Upgrade to hash immediately
+                    new_hash = generate_password_hash(password)
+                    cursor_p.execute("UPDATE student_auth SET password = ? WHERE enrollment_no = ?", (new_hash, enrollment))
+                    conn_portal.commit()
+            
+            if not is_valid:
+                conn_portal.close()
+                return jsonify({'status': 'error', 'message': 'Invalid password'}), 401
+                
+            if auth_record['is_first_login']:
+                require_change = True
 
-    # Login Success - Create Session
-    session['student_id'] = enrollment
-    session['logged_in'] = True
-    
-    conn_portal.close()
-    
-    # Return full user details (similar to /api/me) for Profile page consistency
-    student_year = student['year'] if student['year'] else '1st'
-    
-    return jsonify({
-        'status': 'success', 
-        'enrollment_no': enrollment,
-        'name': student['name'],
-        'department': student['department'] if student['department'] else 'General',
-        'year': student_year,
-        'email': student['email'],
-        'require_change': require_change
-    })
+        # Login Success - Create Session
+        session['student_id'] = enrollment
+        session['logged_in'] = True
+        
+        conn_portal.close()
+        
+        # Return full user details (similar to /api/me) for Profile page consistency
+        student_year = student['year'] if student['year'] else '1st'
+        
+        return jsonify({
+            'status': 'success', 
+            'enrollment_no': enrollment,
+            'name': student['name'],
+            'department': student['department'] if student['department'] else 'General',
+            'year': student_year,
+            'email': student['email'],
+            'require_change': require_change
+        })
+    except Exception as e:
+        error_id = _log_portal_exception('api_login', e)
+        return jsonify({'status': 'error', 'message': f'Login failed: {str(e)}', 'error_id': error_id}), 500
 
 @app.route('/api/public/forgot-password', methods=['POST'])
 @rate_limit
@@ -1348,7 +1418,7 @@ def api_public_register_student():
         })
     except Exception as e:
         error_id = _log_portal_exception('api_public_register_student', e)
-        return jsonify({'status': 'error', 'message': 'Registration failed', 'error_id': error_id}), 500
+        return jsonify({'status': 'error', 'message': f'Registration failed: {str(e)}', 'error_id': error_id}), 500
 
 
 @app.route('/api/settings', methods=['POST'])
@@ -2225,6 +2295,59 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
     </div>
 </body>
 </html>"""
+
+@app.route('/api/renew', methods=['POST'])
+def api_auto_renew():
+    """Automatically extend the due date of a borrowed book by 2 days."""
+    if 'student_id' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
+    data = request.json
+    book_id = data.get('book_id')
+    if not book_id:
+        return jsonify({'status': 'error', 'message': 'Book ID required'}), 400
+
+    enrollment = session['student_id']
+
+    try:
+        conn = get_library_db()
+        cursor = conn.cursor()
+
+        # Find the active borrow record
+        cursor.execute(
+            "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
+            (book_id, enrollment)
+        )
+        record = cursor.fetchone()
+
+        if not record:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'No active loan found for this book'}), 404
+
+        current_due = record['due_date']
+        try:
+            due_d = datetime.strptime(str(current_due), '%Y-%m-%d')
+        except Exception:
+            due_d = datetime.now()
+
+        new_due = due_d + timedelta(days=2)
+        new_due_str = new_due.strftime('%Y-%m-%d')
+
+        cursor.execute(
+            "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+            (new_due_str, book_id, enrollment)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            'status': 'success',
+            'message': f'Due date extended to {new_due.strftime("%d %b %Y")}',
+            'new_due_date': new_due_str
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Renewal failed: {str(e)}'}), 500
+
 
 @app.route('/api/request', methods=['POST'])
 def api_submit_request():
