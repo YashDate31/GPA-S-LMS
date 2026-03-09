@@ -175,18 +175,9 @@ class Database:
                     print("[WARNING] Database: No DATABASE_URL found. Using LOCAL SQLite.")
             
         # Initialize connection pool for PostgreSQL
+        # (Disabled: ThreadedConnectionPool with Tkinter threads + Supabase edge pooler causes 
+        # "SSL connection has been closed unexpectedly" errors due to thread cleanup. We rely on standard direct connect)
         self._pg_pool = None
-        if self.use_cloud:
-            try:
-                self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=2, maxconn=15,
-                    dsn=self.database_url,
-                    connect_timeout=5
-                )
-                print("[OK] Database: Connection pool initialized (2-15 connections)")
-            except Exception as e:
-                print(f"[WARNING] Connection pool init failed: {e}. Will use direct connections.")
-                self._pg_pool = None
 
         self.init_database()
     
