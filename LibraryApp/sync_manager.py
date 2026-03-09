@@ -104,7 +104,7 @@ class SyncManager:
                 return results
 
             local_conn = sqlite3.connect(self.local_db_path)
-            remote_conn = psycopg2.connect(**self.remote_config)
+            remote_conn = psycopg2.connect(self.remote_config)
             
             # Library tables (bidirectional sync)
             tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
@@ -601,30 +601,11 @@ def create_sync_manager(db):
         
         # Parse PostgreSQL connection string
         # Format: postgresql://user:password@host:port/database
-        try:
-            import re
-            match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', database_url)
-            if not match:
-                print("[WARNING] Sync Manager: Invalid DATABASE_URL format")
-                return None
-            
-            user, password, host, port, dbname = match.groups()
-            
-            remote_config = {
-                'host': host,
-                'port': int(port),
-                'database': dbname,
-                'user': user,
-                'password': password
-            }
-            
-            print(f"[OK] Sync Manager: Configured for remote sync to {host}/{dbname}")
-            print(f"   Local: {local_db_path}")
-            return SyncManager(local_db_path, remote_config)
-            
-        except Exception as e:
-            print(f"[WARNING] Sync Manager: Failed to parse DATABASE_URL: {e}")
-            return None
+        remote_config = database_url
+        
+        print(f"[OK] Sync Manager: Configured for remote sync")
+        print(f"   Local: {local_db_path}")
+        return SyncManager(local_db_path, remote_config)
             
     except Exception as e:
         print(f"[WARNING] Sync Manager: Failed to initialize: {e}")
