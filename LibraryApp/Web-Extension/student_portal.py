@@ -1307,6 +1307,11 @@ def api_change_password():
         WHERE enrollment_no = ?
     """, (hashed_pw, enrollment))
     
+    _push_to_cloud(
+        "INSERT INTO student_auth (enrollment_no, password, is_first_login, last_changed) VALUES (?, ?, 0, CURRENT_TIMESTAMP) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 0, last_changed = CURRENT_TIMESTAMP",
+        (enrollment, hashed_pw)
+    )
+    
     conn.commit()
     conn.close()
     
@@ -3120,6 +3125,10 @@ def api_admin_approve_request(req_id):
              # Reset to Enrollment Number using EXISTING cursor (Fixes Timeout)
              default_hash = generate_password_hash(req['enrollment_no'])
              cursor.execute("UPDATE student_auth SET password = ?, is_first_login = 1 WHERE enrollment_no = ?", (default_hash, req['enrollment_no']))
+             _push_to_cloud(
+                 "INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 1",
+                 (req['enrollment_no'], default_hash)
+             )
         except Exception as e:
              return jsonify({'error': f"Failed to reset password: {str(e)}"}), 500
 
@@ -3370,6 +3379,11 @@ def api_admin_reset_password(enrollment_no):
             VALUES (?, ?, 1)
         """, (enrollment_no, hashed_pw))
     
+    _push_to_cloud(
+        "INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 1, last_changed = CURRENT_TIMESTAMP",
+        (enrollment_no, hashed_pw)
+    )
+    
     conn.commit()
     conn.close()
     
@@ -3425,6 +3439,10 @@ def api_admin_bulk_password_reset():
                     VALUES (?, ?, 1)
                 """, (enrollment_no, hashed_pw))
             
+            _push_to_cloud(
+                "INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 1, last_changed = CURRENT_TIMESTAMP",
+                (enrollment_no, hashed_pw)
+            )
             reset_count += 1
         
         conn_portal.commit()
