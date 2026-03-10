@@ -2342,8 +2342,15 @@ Government Polytechnic Awasari (Kh)"""
         self.stats_container = tk.Frame(dashboard_frame, bg=self.colors['primary'])
         self.stats_container.pack(fill=tk.X, padx=20, pady=20)
         
-        # Statistics cards
-        self.create_stats_cards(self.stats_container)
+        # Show loading placeholder; refresh_all_data() will populate stats shortly
+        loading_label = tk.Label(
+            self.stats_container,
+            text="Loading statistics...",
+            font=('Segoe UI', 12),
+            bg=self.colors['primary'],
+            fg='#888888'
+        )
+        loading_label.pack(pady=20)
         
         # Current Issued Books (Dashboard Table)
         borrowed_frame = tk.LabelFrame(
@@ -4709,6 +4716,7 @@ Current Settings:
     
     def get_library_statistics(self):
         """Get library statistics (helper for worker thread)"""
+        conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
@@ -4739,6 +4747,11 @@ Current Settings:
             }
         except Exception as e:
             print(f"Error getting statistics: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
             return {
                 'total_books': 0,
                 'available_books': 0,
@@ -4777,7 +4790,7 @@ Current Settings:
         
         tk.Label(search_controls, text="Year:", bg=self.colors['primary'], fg=self.colors['accent'], font=('Segoe UI', 10)).pack(side=tk.LEFT)
         # Include 'Pass Out' instead of '4th' for final year
-        year_combo = ttk.Combobox(search_controls, textvariable=self.student_year_filter, values=["All", "1st Year", "2nd Year", "3rd Year", "Pass Out"], state="readonly", width=12)
+        year_combo = ttk.Combobox(search_controls, textvariable=self.student_year_filter, values=["All", "1st", "2nd", "3rd", "Pass Out"], state="readonly", width=12)
         year_combo.pack(side=tk.LEFT, padx=5)
         year_combo.bind('<<ComboboxSelected>>', lambda e: self.search_students())
 
@@ -4949,6 +4962,7 @@ Current Settings:
             command=self.export_books_to_excel,
             cursor='hand2'
         )
+        export_books_btn.pack(side=tk.LEFT, padx=5)
         # Books list
         books_list_frame = tk.LabelFrame(
             books_frame,
@@ -5783,7 +5797,7 @@ Current Settings:
             ("Email:", "email", student[3] or '', True),
             ("Phone:", "phone", student[4] or '', True),
             ("Department:", "department", student[5] or 'Computer', False),  # Read-only
-            ("Year:", "year", student[6] or '1st Year', True)
+            ("Year:", "year", student[6] or '1st', True)
         ]
         
         entries = {}
@@ -5803,7 +5817,7 @@ Current Settings:
             if field_name == "year":
                 entry = ttk.Combobox(
                     form_frame,
-                    values=["1st Year", "2nd Year", "3rd Year", "Pass Out"],
+                    values=["1st", "2nd", "3rd", "Pass Out"],
                     font=('Segoe UI', 11),
                     width=25,
                     state="readonly" if editable else "disabled"
@@ -6661,7 +6675,7 @@ Current Settings:
             if field_name == "year":
                 entry = ttk.Combobox(
                     form_frame,
-                    values=["1st", "2nd", "3rd", "4th"],
+                    values=["1st", "2nd", "3rd"],
                     font=('Segoe UI', 11),
                     width=25,
                     state="readonly"
@@ -6826,12 +6840,17 @@ Current Settings:
             if field_name == "category":
                 entry = ttk.Combobox(
                     form_frame,
-                    values=["Technology", "Textbook", "Research"],
+                    values=[
+                        "Core CS", "Web Development", "Programming", "Database",
+                        "AI/ML", "Networking", "Operating Systems", "Algorithms",
+                        "Software Engineering", "Mobile Development", "Cloud Computing",
+                        "Cybersecurity", "IoT", "Competitive Programming", "Project Guides", "Others"
+                    ],
                     font=('Segoe UI', 11),
                     width=25,
                     state="readonly"
                 )
-                entry.set("Technology")  # Default category
+                entry.set("Core CS")  # Default category
                 entry.grid(row=i, column=1, pady=(0, 15))
             elif field_name == "book_id":
                 # Book ID entry with auto-generate option
@@ -7079,6 +7098,7 @@ Current Settings:
 
     def _borrow_book_worker(self, enrollment_no, book_id, borrow_date, due_date):
         """Worker: Pre-borrow DB checks + Execute Borrow"""
+        conn = None
         try:
             # Enforce: Pass Out students cannot borrow
             conn = self.db.get_connection()
@@ -7099,14 +7119,18 @@ Current Settings:
             cur.execute("SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'", (enrollment_no,))
             current_books = cur.fetchone()[0]
             conn.close()
+            conn = None
             
             if current_books >= max_books:
                 return (False, f"Limit Reached: Student has {current_books}/{max_books} books.")
         except Exception as e:
             print(f"Pre-borrow validation error: {e}")
-            # If check fails unexpectedly, we typically proceed or fail safe. 
-            # Let's fail safe to be sure, or just log.
-            pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return (False, f"Validation failed: {e}")
 
         return self.db.borrow_book(enrollment_no, book_id, borrow_date, due_date)
 
@@ -7196,6 +7220,7 @@ Current Settings:
         fine_data = None
         if success:
             # Late return fine calculation (DB Read)
+            conn = None
             try:
                 conn = self.db.get_connection()
                 cur = conn.cursor()
@@ -7206,6 +7231,7 @@ Current Settings:
                 """, (enrollment_no, book_id))
                 row = cur.fetchone()
                 conn.close()
+                conn = None
                 if row and row[0] and row[1]:
                     from datetime import datetime as _dt
                     due_dt = _dt.strptime(row[0], '%Y-%m-%d')
@@ -7216,6 +7242,11 @@ Current Settings:
                         fine_data = (days_late, fine_amount)
             except Exception as e:
                 print(f"Late return fine computation failed: {e}")
+                if conn:
+                    try:
+                        conn.close()
+                    except:
+                        pass
         
         return (success, message, fine_data)
 
@@ -8300,6 +8331,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
     
     def get_recent_activities(self):
         """Get recent activities for dashboard"""
+        conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
@@ -8324,10 +8356,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return activities
         except Exception as e:
             print(f"Error getting recent activities: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
             return []
     
     def get_all_records(self):
         """Get all transaction records including academic year"""
+        conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
@@ -8405,6 +8443,11 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return formatted_records
         except Exception as e:
             print(f"Error getting records: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
             return []
 
     # ------------------------------------------------------------------
@@ -9068,14 +9111,14 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 rows = cur.fetchall()
                 c_12 = c_23 = c_3p = c_skip = 0
                 
-                # Collect promotion records
+                # Collect promotion records and batch updates
                 promotion_records = []
+                batch_updates = []
                 
                 for en, name, yr in rows:
                     new = _promote_once(yr)
                     if new != yr:
-                        cur.execute('UPDATE students SET year=? WHERE enrollment_no=?', (new, en))
-                        # Store promotion data for later insertion
+                        batch_updates.append((new, en))
                         promotion_records.append((en, name, yr, new, letter_number, academic_year))
                         
                         if _norm(yr) == '1st' and new == '2nd':
@@ -9086,6 +9129,10 @@ Note: This is an automated email. Please find the attached formal overdue letter
                             c_3p += 1
                     else:
                         c_skip += 1
+                
+                # Batch UPDATE: single executemany instead of N individual queries
+                if batch_updates:
+                    cur.executemany('UPDATE students SET year=? WHERE enrollment_no=?', batch_updates)
                 
                 conn.commit()
                 conn.close()
@@ -9405,37 +9452,36 @@ Note: This is an automated email. Please find the attached formal overdue letter
         try:
             books = self.db.get_books()
             
-            # Filter Computer department books
+            # Defensive validation: check for missing Book ID or Title
+            invalid_rows = []
+            for b in books:
+                try:
+                    book_id_val = str(b[1]).strip()
+                    title_val = str(b[2]).strip()
+                    if not book_id_val or not title_val:
+                        invalid_rows.append(b)
+                except Exception:
+                    invalid_rows.append(b)
+            if invalid_rows:
+                if not messagebox.askyesno(
+                    "Validation Warning",
+                    f"Detected {len(invalid_rows)} book record(s) with missing Book ID or Title. Continue export?"
+                ):
+                    return
+            
+            # Export all books
             filtered_books = []
             for book in books:
-                # Defensive validation: check for missing Book ID or Title (should not happen due to enforced validation)
-                invalid_rows = []
-                for b in books:
-                    # Assuming schema: (id, book_id, title, author, isbn, category, total_copies, available_copies)
-                    try:
-                        book_id_val = str(b[1]).strip()
-                        title_val = str(b[2]).strip()
-                        if not book_id_val or not title_val:
-                            invalid_rows.append(b)
-                    except Exception:
-                        invalid_rows.append(b)
-                if invalid_rows:
-                    if not messagebox.askyesno(
-                        "Validation Warning",
-                        f"Detected {len(invalid_rows)} book record(s) with missing Book ID or Title. Continue export?"
-                    ):
-                        return
-                if book[5] in ["Technology", "Textbook", "Research"]:
-                    filtered_books.append({
-                        'Book ID': book[1],
-                        'Title': book[2],
-                        'Author': book[3],
-                        'ISBN': book[4],
-                        'Category': book[5],
-                        'Total Copies': book[6],
-                        'Available Copies': book[7],
-                        'Date Added': book[8]
-                    })
+                filtered_books.append({
+                    'Book ID': book[1],
+                    'Title': book[2],
+                    'Author': book[3],
+                    'ISBN': book[4],
+                    'Category': book[5],
+                    'Total Copies': book[6],
+                    'Available Copies': book[7],
+                    'Date Added': book[8]
+                })
             
             if not filtered_books:
                 messagebox.showwarning("Warning", "No books found to export!")
@@ -9512,7 +9558,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
                      bg='white', fg=self.colors['accent']).grid(row=1, column=0, sticky='w', pady=6)
             export_year_var = tk.StringVar(value="All")
             ttk.Combobox(form, textvariable=export_year_var,
-                         values=["All", "1st Year", "2nd Year", "3rd Year", "Pass Out"],
+                         values=["All", "1st", "2nd", "3rd", "Pass Out"],
                          state="readonly", width=28).grid(row=1, column=1, padx=10, pady=6)
 
             # Status filter
