@@ -12182,12 +12182,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
             if status_data:
                 labels = list(status_data.keys())
                 sizes = list(status_data.values())
-                colors_pie = ['#28a745', '#17a2b8', '#ffc107', '#dc3545', '#6c757d'][:len(labels)]
-                wedges, texts, autotexts = ax3.pie(sizes, labels=labels, autopct='%1.0f%%', 
-                    colors=colors_pie, startangle=90, textprops={'fontsize': 8})
-                for autotext in autotexts:
-                    autotext.set_fontsize(8)
-                    autotext.set_fontweight('bold')
+                # Guard against all-zero data (causes NaN in matplotlib pie)
+                if sum(sizes) > 0:
+                    colors_pie = ['#28a745', '#17a2b8', '#ffc107', '#dc3545', '#6c757d'][:len(labels)]
+                    wedges, texts, autotexts = ax3.pie(sizes, labels=labels, autopct='%1.0f%%', 
+                        colors=colors_pie, startangle=90, textprops={'fontsize': 8})
+                    for autotext in autotexts:
+                        autotext.set_fontsize(8)
+                        autotext.set_fontweight('bold')
+                else:
+                    ax3.text(0.5, 0.5, "No data yet", ha='center', va='center', fontsize=10, color='#888')
             else:
                 ax3.text(0.5, 0.5, "No data", ha='center', va='center')
             ax3.axis('equal')

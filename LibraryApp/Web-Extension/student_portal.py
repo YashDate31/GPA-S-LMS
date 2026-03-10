@@ -14,6 +14,7 @@ from functools import wraps
 import time
 import subprocess
 from collections import defaultdict
+import queue
 try:
     from dotenv import load_dotenv
     # Try loading .env from multiple locations (repo root, parent, cwd)
@@ -432,28 +433,50 @@ def set_csrf_cookie(response):
     return response
 
 
-# --- Observability: Logging Middleware ---
+# --- Observability: Logging Middleware (serialized via queue) ---
+_log_queue = queue.Queue()
+
+def _log_writer_loop():
+    """Single background thread that drains the log queue and writes in batches."""
+    while True:
+        batch = []
+        try:
+            # Block until at least one item
+            batch.append(_log_queue.get(timeout=5))
+            # Drain remaining without blocking
+            while not _log_queue.empty():
+                try:
+                    batch.append(_log_queue.get_nowait())
+                except queue.Empty:
+                    break
+        except queue.Empty:
+            continue
+        
+        if batch:
+            try:
+                conn = get_portal_db()
+                cursor = conn.cursor()
+                cursor.executemany(
+                    "INSERT INTO access_logs (endpoint, method, status) VALUES (?, ?, ?)",
+                    batch
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Logging batch failed: {e}")
+
+_log_writer_thread = threading.Thread(target=_log_writer_loop, daemon=True)
+_log_writer_thread.start()
+
 @app.after_request
 def log_request(response):
-    """Log every request to the access_logs table"""
+    """Log every request to the access_logs table (queued, non-blocking)"""
     if request.path.startswith('/static') or request.path.startswith('/assets'):
         return response
     
     try:
-        # Use a separate thread to avoid slowing down the response
-        def write_log(endpoint, method, status):
-            try:
-                conn = get_portal_db()
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO access_logs (endpoint, method, status) VALUES (?, ?, ?)",
-                               (endpoint, method, status))
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                print(f"Logging failed: {e}")
-
-        threading.Thread(target=write_log, args=(request.path, request.method, response.status_code)).start()
-    except Exception:
+        _log_queue.put_nowait((request.path, request.method, response.status_code))
+    except queue.Full:
         pass
         
     return response
