@@ -139,8 +139,8 @@ class SyncManager:
                     portal_conn = sqlite3.connect(portal_db_path)
                     portal_conn.row_factory = sqlite3.Row
                     
-                    # Tables to sync FROM cloud TO local (student submissions)
-                    portal_tables_pull = ['requests', 'deletion_requests']
+                    # Tables to sync FROM cloud TO local (student submissions + auth)
+                    portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
                     for idx, table in enumerate(portal_tables_pull):
                         if progress_callback:
                             progress = 50 + ((idx + 1) / len(portal_tables_pull)) * 25
@@ -157,8 +157,8 @@ class SyncManager:
                             # Don't fail entire sync if portal tables have issues
                             results['errors'].append(f"portal.{table}: {str(e)}")
                     
-                    # Tables to sync FROM local TO cloud (admin broadcasts)
-                    portal_tables_push = ['notices']
+                    # Tables to sync FROM local TO cloud (admin broadcasts + auth)
+                    portal_tables_push = ['notices', 'student_auth']
                     for idx, table in enumerate(portal_tables_push):
                         if progress_callback:
                             progress = 75 + ((idx + 1) / len(portal_tables_push)) * 25
@@ -356,6 +356,8 @@ class SyncManager:
                 unique_key_cols = ['enrollment_no', 'request_type', 'created_at']
             elif table_name == 'deletion_requests':
                 unique_key_cols = ['student_id', 'timestamp']
+            elif table_name == 'student_auth':
+                unique_key_cols = ['enrollment_no']
             elif table_name == 'notices':
                 unique_key_cols = ['title', 'created_at']
             else:
@@ -387,7 +389,18 @@ class SyncManager:
                     exists = local_cursor.fetchone()
                     
                     if exists:
-                        # Record already exists - could update but for now skip to save time
+                        # For student_auth, update existing records (password may have changed)
+                        if table_name == 'student_auth':
+                            update_cols = []
+                            update_vals = []
+                            for rc in remote_columns:
+                                if rc in column_map and rc not in unique_key_cols:
+                                    update_cols.append(f"{column_map[rc]} = ?")
+                                    update_vals.append(row_dict[rc])
+                            if update_cols:
+                                update_vals.extend(unique_vals)
+                                update_query = f"UPDATE {table_name} SET {', '.join(update_cols)} WHERE {where_clause}"
+                                local_cursor.execute(update_query, update_vals)
                         synced_count += 1
                         continue
                     
@@ -453,6 +466,16 @@ class SyncManager:
                         )
                     """)
                     remote_conn.commit()
+                elif table_name == 'student_auth':
+                    remote_cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS student_auth (
+                            enrollment_no TEXT PRIMARY KEY,
+                            password TEXT NOT NULL,
+                            is_first_login INTEGER DEFAULT 1,
+                            last_changed TIMESTAMP
+                        )
+                    """)
+                    remote_conn.commit()
             
             # Get records from local
             local_cursor.execute(f"SELECT * FROM {table_name}")
@@ -485,6 +508,8 @@ class SyncManager:
             # Define unique key for deduplication
             if table_name == 'notices':
                 unique_key_cols = ['title', 'created_at']
+            elif table_name == 'student_auth':
+                unique_key_cols = ['enrollment_no']
             else:
                 unique_key_cols = ['created_at']
             
@@ -511,6 +536,19 @@ class SyncManager:
                     exists = remote_cursor.fetchone()
                     
                     if exists:
+                        # For student_auth, update existing records (password may have changed)
+                        if table_name == 'student_auth':
+                            update_cols = []
+                            update_vals = []
+                            for lc in local_columns:
+                                if lc in column_map and lc not in unique_key_cols:
+                                    update_cols.append(f"{column_map[lc]} = %s")
+                                    update_vals.append(row_dict[lc])
+                            if update_cols:
+                                update_vals.extend(unique_vals)
+                                update_query = f"UPDATE {table_name} SET {', '.join(update_cols)} WHERE {where_clause}"
+                                remote_cursor.execute(update_query, update_vals)
+                                remote_conn.commit()
                         synced_count += 1
                         continue
                     
@@ -545,7 +583,6 @@ class SyncManager:
             
         except Exception as e:
             print(f"Error syncing portal table {table_name} local to remote: {e}")
-            return 0
             return 0
     
     def auto_sync_daemon(self, interval_minutes=5):

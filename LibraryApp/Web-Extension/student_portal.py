@@ -118,6 +118,7 @@ def _push_to_cloud(sql, params=None):
     def _do_push():
         try:
             pg_sql = sql.replace('?', '%s')
+            pg_sql = pg_sql.replace('INSTR(', 'STRPOS(').replace('instr(', 'strpos(')
             conn = psycopg2.connect(database_url, connect_timeout=5)
             cur = conn.cursor()
             cur.execute(pg_sql, params)
@@ -1158,6 +1159,10 @@ def api_login():
                 cursor_p.execute("INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1)", 
                                  (enrollment, hashed_pw))
                 conn_portal.commit()
+                _push_to_cloud(
+                    "INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1) ON CONFLICT (enrollment_no) DO NOTHING",
+                    (enrollment, hashed_pw)
+                )
                 require_change = True
             else:
                 conn_portal.close()
@@ -3124,9 +3129,9 @@ def api_admin_approve_request(req_id):
         try:
              # Reset to Enrollment Number using EXISTING cursor (Fixes Timeout)
              default_hash = generate_password_hash(req['enrollment_no'])
-             cursor.execute("UPDATE student_auth SET password = ?, is_first_login = 1 WHERE enrollment_no = ?", (default_hash, req['enrollment_no']))
+             cursor.execute("UPDATE student_auth SET password = ?, is_first_login = 1, last_changed = CURRENT_TIMESTAMP WHERE enrollment_no = ?", (default_hash, req['enrollment_no']))
              _push_to_cloud(
-                 "INSERT INTO student_auth (enrollment_no, password, is_first_login) VALUES (?, ?, 1) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 1",
+                 "INSERT INTO student_auth (enrollment_no, password, is_first_login, last_changed) VALUES (?, ?, 1, CURRENT_TIMESTAMP) ON CONFLICT (enrollment_no) DO UPDATE SET password = EXCLUDED.password, is_first_login = 1, last_changed = CURRENT_TIMESTAMP",
                  (req['enrollment_no'], default_hash)
              )
         except Exception as e:
