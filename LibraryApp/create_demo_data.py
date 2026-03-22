@@ -32,7 +32,7 @@ def create_demo_data():
         ("2024CS003", "Arjun Reddy", "arjun.reddy@student.gpa.edu", "9876543212", "Computer", "1st Year"),
         ("2024CS004", "Ananya Singh", "ananya.singh@student.gpa.edu", "9876543213", "Computer", "1st Year"),
         ("2024CS005", "Vihaan Kumar", "vihaan.kumar@student.gpa.edu", "9876543214", "Computer", "1st Year"),
-        
+
         # 2nd Year
         ("2023CS001", "Ishaan Gupta", "ishaan.gupta@student.gpa.edu", "9876543220", "Computer", "2nd Year"),
         ("2023CS002", "Saanvi Verma", "saanvi.verma@student.gpa.edu", "9876543221", "Computer", "2nd Year"),
