@@ -17,7 +17,11 @@ def _load_env(repo_root: Path) -> None:
     # First try python-dotenv if available
     try:
         from dotenv import load_dotenv  # type: ignore
-        load_dotenv(env_path)
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            # Fallback search (same idea used in main.py)
+            load_dotenv()
     except Exception:
         pass
 
