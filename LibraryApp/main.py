@@ -10545,72 +10545,111 @@ Note: This is an automated email. Please find the attached formal overdue letter
             if not col_title:
                 return []
 
-            results = []
-            for _, row in df.iterrows():
-                title_val = safe_str(row.get(col_title, ''))
-                if not title_val:
-                    continue
+            def collect_accessions_from_row(row):
+                """Collect all numeric accession values from a row."""
+                row_acc = []
 
-                # Skip continuation rows (Sr No is NaN)
-                if col_srno:
-                    if is_nan_val(row.get(col_srno)):
-                        continue
-
-                author_val    = safe_str(row.get(col_author, '')    if col_author    else '')
-                publisher_val = safe_str(row.get(col_publisher, '') if col_publisher else '')
-                copies_val    = safe_int(row.get(col_copies, 1)     if col_copies    else 1)
-                price_val     = safe_float(row.get(col_price, 0)    if col_price     else 0)
-
-                # ── Collect ALL accession numbers ──────────────────────────
-                all_acc = []
-                # First: the main Accession Number column
+                # First: main accession column
                 if col_accession:
                     acc = row.get(col_accession, '')
                     if not is_nan_val(acc) and safe_str(acc):
-                        try:   all_acc.append(str(int(float(str(acc).strip()))))
-                        except: pass  # skip non-numeric accession values
+                        try:
+                            row_acc.append(str(int(float(str(acc).strip()))))
+                        except:
+                            pass
+
                 # Then: overflow columns (Unnamed:7, Unnamed:8, …)
-                # Only numeric values are accession numbers; skip text like "TO"
                 for ec in acc_overflow_cols:
                     val = row.get(ec, '')
                     if is_nan_val(val):
                         continue
                     v = safe_str(val)
                     if v:
-                        try:   all_acc.append(str(int(float(v))))
-                        except: pass  # skip non-numeric cells (e.g. "TO")
+                        try:
+                            row_acc.append(str(int(float(v))))
+                        except:
+                            # Skip text tokens like "TO"
+                            pass
 
-                # Fallback to catalog/Sr Actual NO
-                if not all_acc and col_catalog:
+                # Fallback to catalog only if accession columns are empty
+                if not row_acc and col_catalog:
                     cat = row.get(col_catalog, '')
                     if not is_nan_val(cat) and safe_str(cat):
-                        try:   all_acc.append(str(int(float(str(cat).strip()))))
-                        except: all_acc.append(safe_str(cat))
+                        try:
+                            row_acc.append(str(int(float(str(cat).strip()))))
+                        except:
+                            row_acc.append(safe_str(cat))
 
-                # Deduplicate while preserving order (e.g. "45 TO 45" → [45])
+                return row_acc
+
+            def dedupe_keep_order(items):
                 seen = set()
-                deduped_acc = []
-                for _a in all_acc:
-                    if _a not in seen:
-                        seen.add(_a)
-                        deduped_acc.append(_a)
-                all_acc = deduped_acc
+                out = []
+                for x in items:
+                    if x not in seen:
+                        seen.add(x)
+                        out.append(x)
+                return out
 
+            results = []
+            current_book = None
+
+            for _, row in df.iterrows():
+                title_val = safe_str(row.get(col_title, ''))
+                author_val = safe_str(row.get(col_author, '') if col_author else '')
+                publisher_val = safe_str(row.get(col_publisher, '') if col_publisher else '')
+                price_val = safe_float(row.get(col_price, 0) if col_price else 0)
+
+                copies_raw = row.get(col_copies, None) if col_copies else None
+                has_copies = (copies_raw is not None and not is_nan_val(copies_raw) and safe_str(copies_raw) != '')
+                copies_val = safe_int(copies_raw, 1) if has_copies else None
+
+                row_acc = collect_accessions_from_row(row)
+
+                if title_val:
+                    # Start a new logical book row
+                    current_book = {
+                        'title': title_val,
+                        'author': author_val,
+                        'publisher': publisher_val,
+                        'price': price_val,
+                        '_copies_declared': copies_val,
+                        '_acc_list': row_acc[:],
+                        'sheet': sheet_name
+                    }
+                    results.append(current_book)
+                    continue
+
+                # Continuation row: no title, but may contain remaining accession numbers
+                if current_book and row_acc:
+                    current_book['_acc_list'].extend(row_acc)
+                    # If continuation row unexpectedly includes total copies, keep a valid declared count
+                    if copies_val is not None and (current_book.get('_copies_declared') is None):
+                        current_book['_copies_declared'] = copies_val
+
+            # Finalize computed fields
+            finalized = []
+            for b in results:
+                all_acc = dedupe_keep_order(b.get('_acc_list', []))
                 first_id, range_str, csv_str = make_accession_info(all_acc)
-                # Use actual TOTAL column for copy count (more reliable than counting accessions)
-                # but if TOTAL is missing/1 and we collected many accessions, use that count
+
+                copies_val = b.get('_copies_declared') if b.get('_copies_declared') else len(all_acc)
+                copies_val = max(copies_val, 1)
                 if copies_val <= 1 and len(all_acc) > 1:
                     copies_val = len(all_acc)
 
-                results.append({
-                    'title': title_val, 'author': author_val,
-                    'publisher': publisher_val, 'copies': copies_val,
-                    'book_id': range_str or first_id,   # display-friendly range, e.g. "8264-8266"
-                    'accession_csv': csv_str,            # "8264,8265,8266" for DB barcode field
-                    'price': price_val,
-                    'sheet': sheet_name
+                finalized.append({
+                    'title': b.get('title', ''),
+                    'author': b.get('author', ''),
+                    'publisher': b.get('publisher', ''),
+                    'copies': copies_val,
+                    'book_id': range_str or first_id,
+                    'accession_csv': csv_str,
+                    'price': b.get('price', 0.0),
+                    'sheet': b.get('sheet', sheet_name)
                 })
-            return results
+
+            return finalized
 
         def parse_bookbank_sheet(df):
             """Parse bookbank format (each row = 1 physical copy). Returns list grouped by title+author."""
