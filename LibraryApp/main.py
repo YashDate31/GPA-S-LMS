@@ -932,6 +932,18 @@ class LibraryApp:
         if hasattr(self, '_is_refreshing') and self._is_refreshing:
             return
         self._is_refreshing = True
+
+        def get_sync_state_from_log():
+            """Read sync state from sync_log.json ('in_progress', 'completed', etc.)."""
+            try:
+                sync_log_path = os.path.join(os.path.dirname(self.db.db_path), 'sync_log.json')
+                if os.path.exists(sync_log_path):
+                    with open(sync_log_path, 'r') as f:
+                        data = json.load(f)
+                    return str(data.get('status', '')).strip().lower()
+            except Exception:
+                pass
+            return ''
         
         # Update status indicator
         def set_status(text, color='#38BDF8'): # Light blue for active
@@ -976,9 +988,13 @@ class LibraryApp:
 
         def finish_refresh():
             self._is_refreshing = False
-            # Show "Last updated: Time"
-            now = datetime.now().strftime("%I:%M %p")
-            set_status(f"✔️ Updated {now}", '#94a3b8')
+            # Show syncing indicator when sync is active; otherwise show last updated time.
+            sync_state = get_sync_state_from_log()
+            if sync_state == 'in_progress':
+                set_status("🔄 Syncing...", '#38BDF8')
+            else:
+                now = datetime.now().strftime("%I:%M %p")
+                set_status(f"✔️ Updated {now}", '#94a3b8')
             
             # Schedule next refresh in 2 minutes (120 seconds)
             self.root.after(120000, self._refresh_all_data)
