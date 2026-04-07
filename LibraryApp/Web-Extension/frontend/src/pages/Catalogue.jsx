@@ -23,7 +23,7 @@ const CATEGORY_ICONS = {
   'Competitive Programming': Code
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 30;
 
 // Generative book cover colors based on category/title hash
 const getCoverStyle = (category) => {
