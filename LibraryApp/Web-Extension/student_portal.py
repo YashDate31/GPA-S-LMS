@@ -67,25 +67,42 @@ ALLOWED_PHOTO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 MAX_PHOTO_BYTES = 50 * 1024  # 50KB
 
 
-def _load_portal_fine_per_day():
-    """Load the shared fine-per-day setting used by the desktop app."""
-    default_fine = 1
-    try:
-        if getattr(sys, 'frozen', False):
-            settings_path = os.path.join(os.path.dirname(sys.executable), 'library_settings.json')
-        else:
-            settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'library_settings.json')
+_fine_cache = {
+    'path': None,
+    'mtime': None,
+    'value': 1,
+}
 
-        if os.path.exists(settings_path):
+
+def _get_library_settings_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.join(os.path.dirname(sys.executable), 'library_settings.json')
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'library_settings.json')
+
+
+def get_portal_fine_per_day():
+    """Get fine/day dynamically from shared library settings with mtime-based cache refresh."""
+    default_fine = 1
+    settings_path = _get_library_settings_path()
+    _fine_cache['path'] = settings_path
+
+    try:
+        mtime = os.path.getmtime(settings_path)
+    except Exception:
+        return _fine_cache.get('value', default_fine) or default_fine
+
+    # Reload only when file changes
+    if _fine_cache.get('mtime') != mtime:
+        try:
             with open(settings_path, 'r') as f:
                 settings = json.load(f)
-            return int(settings.get('fine_per_day', default_fine))
-    except Exception as e:
-        print(f"[Portal] Using default fine per day ({default_fine}) due to settings load error: {e}")
-    return default_fine
+            _fine_cache['value'] = int(settings.get('fine_per_day', default_fine))
+            _fine_cache['mtime'] = mtime
+            print(f"[Portal] fine_per_day refreshed: {_fine_cache['value']}")
+        except Exception as e:
+            print(f"[Portal] Failed to refresh fine_per_day from settings: {e}")
 
-
-FINE_PER_DAY = _load_portal_fine_per_day()
+    return _fine_cache.get('value', default_fine) or default_fine
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -1992,6 +2009,7 @@ def api_alerts():
     conn.close()
     
     today = datetime.now()
+    fine_per_day = get_portal_fine_per_day()
     overdue_count = 0
     total_fine = 0
     overdue_titles = []
@@ -2004,7 +2022,7 @@ def api_alerts():
                 if delta < 0:
                     overdue_count += 1
                     days_late = abs(delta)
-                    total_fine += days_late * FINE_PER_DAY
+                    total_fine += days_late * fine_per_day
                     overdue_titles.append(row['title'])
             except:
                 pass
@@ -2108,6 +2126,7 @@ def api_dashboard():
         })
 
     today = datetime.now().date()
+    fine_per_day = get_portal_fine_per_day()
     
     for row in raw_borrows:
         item = dict(row)
@@ -2128,7 +2147,7 @@ def api_dashboard():
                     item['status'] = 'overdue'
                     overdue_days = abs(delta)
                     item['days_msg'] = f"Overdue by {overdue_days} days"
-                    item['fine'] = overdue_days * FINE_PER_DAY
+                    item['fine'] = overdue_days * fine_per_day
                     notifications.append({
                         'type': 'danger',
                         'msg': f"'{item['title']}' is OVERDUE! Fine: ₹{item['fine']}"
