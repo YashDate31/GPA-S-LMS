@@ -1227,8 +1227,21 @@ def api_login():
         # 1. Check if student exists in MAIN DB (Read-Only)
         conn_lib = get_library_db()
         cursor_lib = conn_lib.cursor()
-        cursor_lib.execute("SELECT * FROM students WHERE enrollment_no = ?", (enrollment,))
-        student = cursor_lib.fetchone()
+        try:
+            cursor_lib.execute("SELECT * FROM students WHERE enrollment_no = ?", (enrollment,))
+            student = cursor_lib.fetchone()
+        except sqlite3.OperationalError as oe:
+            # Self-heal on fresh/empty DB files where table may not yet exist
+            if 'no such table' in str(oe).lower() and 'students' in str(oe).lower():
+                conn_lib.close()
+                _ensure_local_library_schema()
+                conn_lib = get_library_db()
+                cursor_lib = conn_lib.cursor()
+                cursor_lib.execute("SELECT * FROM students WHERE enrollment_no = ?", (enrollment,))
+                student = cursor_lib.fetchone()
+            else:
+                conn_lib.close()
+                raise
         conn_lib.close()
         
         if not student:
