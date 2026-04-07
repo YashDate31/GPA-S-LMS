@@ -31,7 +31,7 @@ class ConfigManager:
         default_config = {
             'database_mode': 'auto',  # 'local', 'remote', or 'auto'
             'auto_sync_enabled': True,
-            'sync_interval_minutes': 30,
+            'sync_interval_minutes': 2,
             'use_connection_pool': True,
             'batch_email_enabled': True,
             'max_email_workers': 5,
@@ -85,7 +85,16 @@ class ConfigManager:
     
     def get_sync_interval(self):
         """Get sync interval in minutes"""
-        return self.config.get('sync_interval_minutes', 30)
+        try:
+            minutes = int(self.config.get('sync_interval_minutes', 2))
+        except Exception:
+            minutes = 2
+        # Keep sync responsive but avoid extreme values
+        if minutes < 1:
+            minutes = 1
+        if minutes > 5:
+            minutes = 5
+        return minutes
     
     def use_connection_pool(self):
         """Check if connection pooling should be used"""

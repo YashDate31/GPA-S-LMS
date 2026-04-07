@@ -705,6 +705,12 @@ class LibraryApp:
                     sync_interval = 5 
                     if hasattr(self.config_manager, 'get_sync_interval'):
                         sync_interval = self.config_manager.get_sync_interval()
+                    # Enforce fast-sync bounds for better responsiveness
+                    try:
+                        sync_interval = int(sync_interval)
+                    except Exception:
+                        sync_interval = 2
+                    sync_interval = max(1, min(sync_interval, 5))
                     
                     # Start the background daemon (does initial pull + periodic bidirectional sync)
                     self.sync_manager.auto_sync_daemon(sync_interval)
