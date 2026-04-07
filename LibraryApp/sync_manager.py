@@ -91,7 +91,7 @@ class SyncManager:
         except Exception as e:
             print(f"Error marking sync in progress: {e}")
     
-    def sync_now(self, direction='both', progress_callback=None):
+    def sync_now(self, direction='both', progress_callback=None, tables_override=None):
         """
         Perform synchronization with graceful interruption handling
         
@@ -141,7 +141,8 @@ class SyncManager:
             )
             
             # Library tables (bidirectional sync)
-            tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
+            default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
+            tables_to_sync = tables_override or default_tables_to_sync
             
             for idx, table in enumerate(tables_to_sync):
                 if progress_callback:
@@ -174,7 +175,8 @@ class SyncManager:
                     portal_conn.row_factory = sqlite3.Row
                     
                     # Tables to sync FROM cloud TO local (student submissions + auth)
-                    portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
+                    default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
+                    portal_tables_pull = [t for t in (tables_override or default_portal_tables_pull) if t in default_portal_tables_pull]
                     for idx, table in enumerate(portal_tables_pull):
                         if progress_callback:
                             progress = 50 + ((idx + 1) / len(portal_tables_pull)) * 25
@@ -192,7 +194,8 @@ class SyncManager:
                             results['errors'].append(f"portal.{table}: {str(e)}")
                     
                     # Tables to sync FROM local TO cloud (admin broadcasts + auth)
-                    portal_tables_push = ['notices', 'student_auth']
+                    default_portal_tables_push = ['notices', 'student_auth']
+                    portal_tables_push = [t for t in (tables_override or default_portal_tables_push) if t in default_portal_tables_push]
                     for idx, table in enumerate(portal_tables_push):
                         if progress_callback:
                             progress = 75 + ((idx + 1) / len(portal_tables_push)) * 25
@@ -659,7 +662,10 @@ class SyncManager:
 
                 print(f"[Auto-Sync] Background sync at {datetime.now().strftime('%H:%M:%S')}")
                 try:
-                    result = self.sync_now(direction='both')
+                    # Periodic sync: use a lighter table set to avoid re-pulling the heavy books table.
+                    # Full sync still happens on startup/manual sync.
+                    light_tables = ['students', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'requests', 'deletion_requests', 'student_auth', 'notices']
+                    result = self.sync_now(direction='both', tables_override=light_tables)
                     if result.get('success'):
                         print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records synced")
                         next_run_ts = time.time() + (interval_minutes * 60)

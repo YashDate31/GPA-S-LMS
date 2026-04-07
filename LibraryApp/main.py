@@ -942,31 +942,8 @@ class LibraryApp:
         
         def run_refresh_sequence():
             try:
-                # STEP 1: Background Sync (Threaded)
-                def sync_task():
-                    try:
-                        if self.sync_manager:
-                            self.sync_manager.sync_now(direction='both')
-                            return True, None
-                        return True, None
-                    except Exception as e:
-                        return False, str(e)
-
-                def on_sync_done(result):
-                    success, error = result
-                    if not success:
-                        print(f"[AutoSync] Error: {error}")
-                        set_status("⚠️ Sync Failed", '#ef4444')
-                    
-                    # Schedule UI updates sequentially
-                    # Using 'after' prevents UI freeze
-                    self.root.after(100, step_students)
-
-                def bg_thread():
-                    res = sync_task()
-                    self.root.after(0, on_sync_done, res)
-
-                threading.Thread(target=bg_thread, daemon=True).start()
+                # STEP 1: UI refresh only (auto-sync daemon handles periodic sync)
+                self.root.after(100, step_students)
 
             except Exception as e:
                 finish_refresh()
