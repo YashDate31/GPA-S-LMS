@@ -1117,30 +1117,85 @@ class Database:
             conn.close()
     
     def delete_book(self, book_id):
-        """Delete a book"""
+        """Delete a book with safe dependency cleanup.
+
+        Rules:
+        - If currently borrowed, block deletion.
+        - If only historical rows reference the book, remove those rows first,
+          then delete the book.
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # Check if book is borrowed
+            # Check if book exists
+            cursor.execute('SELECT title FROM books WHERE book_id = ?', (book_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False, "Book not found"
+            book_title = row[0] if row else str(book_id)
+
+            # Block delete if there are active borrows
             cursor.execute('''
                 SELECT COUNT(*) FROM borrow_records 
                 WHERE book_id = ? AND status = 'borrowed'
             ''', (book_id,))
-            if cursor.fetchone()[0] > 0:
+            active_borrows = cursor.fetchone()[0]
+            if active_borrows > 0:
                 return False, "Cannot delete book that is currently borrowed"
-            
+
+            # Remove historical dependencies first to satisfy FK constraints
+            cursor.execute('DELETE FROM borrow_records WHERE book_id = ? AND status != "borrowed"', (book_id,))
+            deleted_borrow_history = cursor.rowcount
+
+            # Legacy table cleanup (if used)
+            try:
+                cursor.execute('DELETE FROM transactions WHERE book_id = ?', (book_id,))
+                deleted_transactions = cursor.rowcount
+            except Exception:
+                deleted_transactions = 0
+
+            # Optional local portal table cleanup (same SQLite connection if table exists)
+            try:
+                cursor.execute('DELETE FROM book_waitlist WHERE book_id = ?', (book_id,))
+            except Exception:
+                pass
+            try:
+                cursor.execute('DELETE FROM book_ratings WHERE book_id = ?', (book_id,))
+            except Exception:
+                pass
+
+            # Now delete the book row
             cursor.execute('DELETE FROM books WHERE book_id = ?', (book_id,))
             if cursor.rowcount == 0:
                 return False, "Book not found"
             
             conn.commit()
             
-            # Push to cloud
+            # Push dependency cleanup + delete to cloud (best-effort)
+            self._push_to_cloud('DELETE FROM borrow_records WHERE book_id = ? AND status != "borrowed"', (book_id,))
+            self._push_to_cloud('DELETE FROM transactions WHERE book_id = ?', (book_id,))
+            self._push_to_cloud('DELETE FROM book_waitlist WHERE book_id = ?', (book_id,))
+            self._push_to_cloud('DELETE FROM book_ratings WHERE book_id = ?', (book_id,))
             self._push_to_cloud('DELETE FROM books WHERE book_id = ?', (book_id,))
             
-            return True, "Book deleted successfully"
+            details = []
+            if deleted_borrow_history > 0:
+                details.append(f"{deleted_borrow_history} borrow history record(s)")
+            if deleted_transactions > 0:
+                details.append(f"{deleted_transactions} legacy transaction record(s)")
+            if details:
+                return True, f"Book '{book_title}' deleted successfully (also removed {', '.join(details)})"
+            return True, f"Book '{book_title}' deleted successfully"
         except Exception as e:
-            return False, f"Error: {str(e)}"
+            conn.rollback()
+            error_text = str(e)
+            if 'foreign key' in error_text.lower() or 'constraint' in error_text.lower():
+                return False, (
+                    "Cannot delete this book due to linked records in database.\n\n"
+                    "If this book is still referenced, return all active issues first and try again.\n"
+                    f"Technical error: {error_text}"
+                )
+            return False, f"Error: {error_text}"
         finally:
             conn.close()
     
