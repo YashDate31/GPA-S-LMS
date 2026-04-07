@@ -2664,40 +2664,100 @@ def api_cancel_request(req_id):
 
 @app.route('/api/books')
 def api_books():
-    # Read-Only Catalogue
-    query = request.args.get('q', '')
-    category = request.args.get('category', '')
-    
+    # Read-Only Catalogue with pagination
+    query = request.args.get('q', '').strip()
+    category = request.args.get('category', '').strip()
+    availability = request.args.get('availability', 'all').strip().lower()
+
+    # Pagination params (safe defaults and bounds)
+    try:
+        page = int(request.args.get('page', 1))
+    except Exception:
+        page = 1
+    try:
+        per_page = int(request.args.get('per_page', 50))
+    except Exception:
+        per_page = 50
+
+    page = max(1, page)
+    per_page = max(10, min(per_page, 100))
+    offset = (page - 1) * per_page
+
     conn = get_library_db()
     cursor = conn.cursor()
-    
-    sql = "SELECT book_id, title, author, category, total_copies, available_copies FROM books WHERE 1=1"
+
+    where_parts = []
     params = []
-    
+
     if query:
-        sql += " AND (title LIKE ? OR author LIKE ?)"
-        params.extend([f'%{query}%', f'%{query}%'])
+        where_parts.append("(b.title LIKE ? OR b.author LIKE ? OR COALESCE(b.isbn,'') LIKE ? OR b.book_id LIKE ?)")
+        like_q = f'%{query}%'
+        params.extend([like_q, like_q, like_q, like_q])
+
     if category and category != 'All':
-        sql += " AND category = ?"
+        where_parts.append("b.category = ?")
         params.append(category)
-        
-    sql += " ORDER BY title"
-    
-    cursor.execute(sql, params)
+
+    # Availability filter using computed borrowed count (real-time)
+    if availability == 'available':
+        where_parts.append("(b.total_copies - COALESCE(br.borrowed_count, 0)) > 0")
+    elif availability == 'out_of_stock':
+        where_parts.append("(b.total_copies - COALESCE(br.borrowed_count, 0)) <= 0")
+
+    where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ''
+
+    from_sql = """
+        FROM books b
+        LEFT JOIN (
+            SELECT book_id, COUNT(*) AS borrowed_count
+            FROM borrow_records
+            WHERE status = 'borrowed'
+            GROUP BY book_id
+        ) br ON br.book_id = b.book_id
+    """
+
+    # Total count for pagination metadata
+    cursor.execute(f"SELECT COUNT(*) {from_sql} {where_sql}", params)
+    total = cursor.fetchone()[0]
+
+    # Paged rows
+    cursor.execute(
+        f"""
+        SELECT
+            b.book_id,
+            b.title,
+            b.author,
+            b.category,
+            b.total_copies,
+            (b.total_copies - COALESCE(br.borrowed_count, 0)) AS available_copies
+        {from_sql}
+        {where_sql}
+        ORDER BY b.title
+        LIMIT ? OFFSET ?
+        """,
+        [*params, per_page, offset]
+    )
     books = [dict(row) for row in cursor.fetchall()]
-    
-    # Recalculate available_copies in real-time for data consistency
-    for book in books:
-        cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE book_id = ? AND status = 'borrowed'", (book['book_id'],))
-        borrowed_count = cursor.fetchone()[0]
-        book['available_copies'] = book['total_copies'] - borrowed_count
-    
+
     # Get distinct categories for filter
-    cursor.execute("SELECT DISTINCT category FROM books WHERE category IS NOT NULL ORDER BY category")
+    cursor.execute("SELECT DISTINCT category FROM books WHERE category IS NOT NULL AND TRIM(category) != '' ORDER BY category")
     categories = [row[0] for row in cursor.fetchall()]
-    
+
     conn.close()
-    return jsonify({'books': books, 'categories': categories})
+
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+    return jsonify({
+        'books': books,
+        'categories': categories,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'total_pages': total_pages,
+            'has_prev': page > 1,
+            'has_next': page < total_pages
+        }
+    })
 
 # --- Admin/Librarian API Endpoints ---
 

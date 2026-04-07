@@ -23,6 +23,8 @@ const CATEGORY_ICONS = {
   'Competitive Programming': Code
 };
 
+const PAGE_SIZE = 50;
+
 // Generative book cover colors based on category/title hash
 const getCoverStyle = (category) => {
     const styles = {
@@ -45,8 +47,19 @@ export default function Catalogue() {
   const [books, setBooks] = useState([]);
   const [categories, setCategories] = useState([{ name: 'All', icon: LayoutGrid }]);
   const [loading, setLoading] = useState(true);
+    const [isFetching, setIsFetching] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pagination, setPagination] = useState({
+        page: 1,
+        per_page: PAGE_SIZE,
+        total: 0,
+        total_pages: 1,
+        has_prev: false,
+        has_next: false,
+    });
   
   // Filter States
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -58,14 +71,40 @@ export default function Catalogue() {
   const [selectedBook, setSelectedBook] = useState(null);
   const [showFilters, setShowFilters] = useState(false);
 
-  useEffect(() => {
-    fetchBooks();
-  }, []);
+    useEffect(() => {
+        const t = setTimeout(() => {
+            setDebouncedSearchTerm(searchTerm.trim());
+        }, 300);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        fetchBooks();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentPage, debouncedSearchTerm, selectedCategory, availabilityFilter]);
 
   const fetchBooks = async () => {
+        setError(null);
+        setIsFetching(true);
     try {
-      const { data } = await axios.get('/api/books');
+            const { data } = await axios.get('/api/books', {
+                params: {
+                    q: debouncedSearchTerm,
+                    category: selectedCategory,
+                    availability: availabilityFilter,
+                    page: currentPage,
+                    per_page: PAGE_SIZE,
+                }
+            });
       setBooks(data.books || []);
+            setPagination(data.pagination || {
+                page: currentPage,
+                per_page: PAGE_SIZE,
+                total: (data.books || []).length,
+                total_pages: 1,
+                has_prev: false,
+                has_next: false,
+            });
       
       // Process dynamic categories
       if (data.categories) {
@@ -81,6 +120,7 @@ export default function Catalogue() {
       setBooks([]);
     } finally {
       setLoading(false);
+            setIsFetching(false);
     }
   };
 
@@ -88,18 +128,6 @@ export default function Catalogue() {
     setSelectedBook(book);
     setDetailModalOpen(true);
   };
-
-  const filteredBooks = books.filter(book => {
-    const matchesSearch = book.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          book.author.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = selectedCategory === 'All' || book.category === selectedCategory;
-    const isAvailable = book.available_copies > 0;
-    let matchesAvailability = true;
-    if (availabilityFilter === 'available') matchesAvailability = isAvailable;
-    if (availabilityFilter === 'out_of_stock') matchesAvailability = !isAvailable;
-
-    return matchesSearch && matchesCategory && matchesAvailability;
-  });
 
   if (loading) return <CatalogueSkeleton />;
   if (error) return <div className="p-10"><ErrorMessage message={error} onRetry={fetchBooks} /></div>;
@@ -115,7 +143,9 @@ export default function Catalogue() {
                   {/* Title & Stats */}
                   <div>
                       <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight transition-colors">Catalogue</h1>
-                      <p className="text-xs font-medium text-slate-500 dark:text-slate-400 transition-colors">{filteredBooks.length} titles available</p>
+                                            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 transition-colors">
+                                                {pagination.total} titles found • Page {pagination.page} of {pagination.total_pages}
+                                            </p>
                   </div>
 
                   {/* Search Bar */}
@@ -128,10 +158,13 @@ export default function Catalogue() {
                               placeholder="Search titles, authors, ISBN..." 
                               className="bg-transparent border-none outline-none text-slate-700 dark:text-white w-full placeholder:text-slate-400 font-medium"
                               value={searchTerm}
-                              onChange={(e) => setSearchTerm(e.target.value)}
+                              onChange={(e) => {
+                                setSearchTerm(e.target.value);
+                                setCurrentPage(1);
+                              }}
                           />
                           {searchTerm && (
-                              <button onClick={() => setSearchTerm('')} className="ml-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+                              <button onClick={() => { setSearchTerm(''); setCurrentPage(1); }} className="ml-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
                                   <XCircle size={16} />
                               </button>
                           )}
@@ -157,19 +190,28 @@ export default function Catalogue() {
                       >
                           <div className="pt-4 flex gap-4">
                               <button 
-                                onClick={() => setAvailabilityFilter('all')}
+                                                                onClick={() => {
+                                                                    setAvailabilityFilter('all');
+                                                                    setCurrentPage(1);
+                                                                }}
                                 className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-colors ${availabilityFilter === 'all' ? 'bg-slate-800 dark:bg-white text-white dark:text-slate-900 border-slate-800 dark:border-white' : 'bg-white dark:bg-slate-900/50 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}
                               >
                                 All Status
                               </button>
                               <button 
-                                onClick={() => setAvailabilityFilter('available')}
+                                                                onClick={() => {
+                                                                    setAvailabilityFilter('available');
+                                                                    setCurrentPage(1);
+                                                                }}
                                 className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-colors ${availabilityFilter === 'available' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-slate-900/50 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}
                               >
                                 Available Now
                               </button>
                               <button 
-                                onClick={() => setAvailabilityFilter('out_of_stock')}
+                                                                onClick={() => {
+                                                                    setAvailabilityFilter('out_of_stock');
+                                                                    setCurrentPage(1);
+                                                                }}
                                 className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-colors ${availabilityFilter === 'out_of_stock' ? 'bg-orange-500 text-white border-orange-500' : 'bg-white dark:bg-slate-900/50 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}
                               >
                                 Out of Stock
@@ -187,7 +229,10 @@ export default function Catalogue() {
                       return (
                           <button
                               key={cat.name}
-                              onClick={() => setSelectedCategory(cat.name)}
+                                                            onClick={() => {
+                                                                setSelectedCategory(cat.name);
+                                                                setCurrentPage(1);
+                                                            }}
                               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold whitespace-nowrap transition-all duration-300 ${
                                   isActive 
                                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30 scale-105' 
@@ -210,8 +255,8 @@ export default function Catalogue() {
             layout
           >
             <AnimatePresence mode='popLayout'>
-                {filteredBooks.length > 0 ? (
-                    filteredBooks.map((book) => (
+                {books.length > 0 ? (
+                    books.map((book) => (
                         <motion.div
                             key={book.book_id}
                             layout
@@ -293,6 +338,50 @@ export default function Catalogue() {
                 )}
             </AnimatePresence>
           </motion.div>
+
+                    {/* Pagination Controls */}
+                    {pagination.total_pages > 1 && (
+                        <div className="mt-10 flex flex-wrap items-center justify-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                                disabled={!pagination.has_prev || isFetching}
+                                className="px-3 py-2 rounded-lg border text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200"
+                            >
+                                Prev
+                            </button>
+
+                            {Array.from({ length: pagination.total_pages }, (_, i) => i + 1)
+                                .filter((p) => p === 1 || p === pagination.total_pages || Math.abs(p - pagination.page) <= 2)
+                                .map((p, idx, arr) => {
+                                    const prev = arr[idx - 1];
+                                    const showDots = prev && p - prev > 1;
+                                    return (
+                                        <div key={p} className="flex items-center gap-2">
+                                            {showDots && <span className="px-1 text-slate-400">...</span>}
+                                            <button
+                                                onClick={() => setCurrentPage(p)}
+                                                disabled={isFetching}
+                                                className={`min-w-10 px-3 py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                                                    pagination.page === p
+                                                        ? 'bg-blue-600 text-white border-blue-600'
+                                                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                                                }`}
+                                            >
+                                                {p}
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+
+                            <button
+                                onClick={() => setCurrentPage((p) => Math.min(pagination.total_pages, p + 1))}
+                                disabled={!pagination.has_next || isFetching}
+                                className="px-3 py-2 rounded-lg border text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200"
+                            >
+                                Next
+                            </button>
+                        </div>
+                    )}
       </div>
 
       <RequestModal 
