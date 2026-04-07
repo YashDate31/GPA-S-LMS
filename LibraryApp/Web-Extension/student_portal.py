@@ -65,6 +65,7 @@ REGISTRATION_PHOTO_FOLDER = os.path.join(BASE_DIR, 'uploads', 'registration_phot
 ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'jpg', 'jpeg', 'png', 'zip', 'rar'}
 ALLOWED_PHOTO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 MAX_PHOTO_BYTES = 50 * 1024  # 50KB
+FINE_PER_DAY = 1  # Keep portal fine math aligned with desktop app
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -1983,7 +1984,7 @@ def api_alerts():
                 if delta < 0:
                     overdue_count += 1
                     days_late = abs(delta)
-                    total_fine += days_late * 10 # 10 INR per day
+                    total_fine += days_late * FINE_PER_DAY
                     overdue_titles.append(row['title'])
             except:
                 pass
@@ -2107,7 +2108,7 @@ def api_dashboard():
                     item['status'] = 'overdue'
                     overdue_days = abs(delta)
                     item['days_msg'] = f"Overdue by {overdue_days} days"
-                    item['fine'] = overdue_days * 5 # ₹5 per day per logic in create_demo_data
+                    item['fine'] = overdue_days * FINE_PER_DAY
                     notifications.append({
                         'type': 'danger',
                         'msg': f"'{item['title']}' is OVERDUE! Fine: ₹{item['fine']}"
@@ -2137,7 +2138,7 @@ def api_dashboard():
     # 4. Analytics & Gamification (Computed on Read-Only Data)
     stats = {
         'total_books': len(raw_history) + len(borrows),
-        'total_fines': sum([10 for x in borrows if x.get('status') == 'overdue']), # Estimated current fines
+        'total_fines': sum([x.get('fine', 0) for x in borrows if x.get('status') == 'overdue']),
         'fav_category': 'General',
         'categories': {}
     }
@@ -2675,9 +2676,9 @@ def api_books():
     except Exception:
         page = 1
     try:
-        per_page = int(request.args.get('per_page', 50))
+        per_page = int(request.args.get('per_page', 30))
     except Exception:
-        per_page = 50
+        per_page = 30
 
     page = max(1, page)
     per_page = max(10, min(per_page, 100))
@@ -2698,23 +2699,15 @@ def api_books():
         where_parts.append("b.category = ?")
         params.append(category)
 
-    # Availability filter using computed borrowed count (real-time)
+    # Availability filter using stored available_copies for speed
     if availability == 'available':
-        where_parts.append("(b.total_copies - COALESCE(br.borrowed_count, 0)) > 0")
+        where_parts.append("COALESCE(b.available_copies, 0) > 0")
     elif availability == 'out_of_stock':
-        where_parts.append("(b.total_copies - COALESCE(br.borrowed_count, 0)) <= 0")
+        where_parts.append("COALESCE(b.available_copies, 0) <= 0")
 
     where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ''
 
-    from_sql = """
-        FROM books b
-        LEFT JOIN (
-            SELECT book_id, COUNT(*) AS borrowed_count
-            FROM borrow_records
-            WHERE status = 'borrowed'
-            GROUP BY book_id
-        ) br ON br.book_id = b.book_id
-    """
+    from_sql = "FROM books b"
 
     # Total count for pagination metadata
     cursor.execute(f"SELECT COUNT(*) {from_sql} {where_sql}", params)
@@ -2729,7 +2722,7 @@ def api_books():
             b.author,
             b.category,
             b.total_copies,
-            (b.total_copies - COALESCE(br.borrowed_count, 0)) AS available_copies
+            COALESCE(b.available_copies, 0) AS available_copies
         {from_sql}
         {where_sql}
         ORDER BY b.title
