@@ -2681,7 +2681,7 @@ def api_books():
         sql += " AND category = ?"
         params.append(category)
         
-    sql += " ORDER BY title LIMIT 50"
+    sql += " ORDER BY title"
     
     cursor.execute(sql, params)
     books = [dict(row) for row in cursor.fetchall()]
