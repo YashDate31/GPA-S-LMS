@@ -70,7 +70,8 @@ MAX_PHOTO_BYTES = 50 * 1024  # 50KB
 _fine_cache = {
     'path': None,
     'mtime': None,
-    'value': 1,
+    'value': 5,
+    'last_checked': 0,
 }
 
 
@@ -81,14 +82,46 @@ def _get_library_settings_path():
 
 
 def get_portal_fine_per_day():
-    """Get fine/day dynamically from shared library settings with mtime-based cache refresh."""
-    default_fine = 1
+    """Get fine/day dynamically from shared DB settings (preferred), then file/env fallback."""
+    default_fine = 5
+    now_ts = time.time()
+    # Short cache window to avoid DB/file reads on every request
+    if (now_ts - float(_fine_cache.get('last_checked', 0) or 0)) < 15:
+        return _fine_cache.get('value', default_fine) or default_fine
+
+    # 1) Preferred source: synced DB setting (available on Render)
+    try:
+        conn = get_library_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM system_settings WHERE key = ?", ('fine_per_day',))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            try:
+                raw = row['value']
+            except Exception:
+                raw = row[0]
+            _fine_cache['value'] = int(float(raw))
+            _fine_cache['last_checked'] = now_ts
+            return _fine_cache['value']
+    except Exception:
+        pass
+
+    # 2) Local file fallback (desktop script/exe mode)
     settings_path = _get_library_settings_path()
     _fine_cache['path'] = settings_path
 
     try:
         mtime = os.path.getmtime(settings_path)
     except Exception:
+        # 3) Environment fallback
+        env_fine = os.getenv('FINE_PER_DAY')
+        if env_fine is not None:
+            try:
+                _fine_cache['value'] = int(float(env_fine))
+            except Exception:
+                _fine_cache['value'] = default_fine
+        _fine_cache['last_checked'] = now_ts
         return _fine_cache.get('value', default_fine) or default_fine
 
     # Reload only when file changes
@@ -102,6 +135,7 @@ def get_portal_fine_per_day():
         except Exception as e:
             print(f"[Portal] Failed to refresh fine_per_day from settings: {e}")
 
+    _fine_cache['last_checked'] = now_ts
     return _fine_cache.get('value', default_fine) or default_fine
 
 # Create upload folder if it doesn't exist
