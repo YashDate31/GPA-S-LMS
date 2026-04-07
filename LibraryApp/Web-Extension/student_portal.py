@@ -2779,8 +2779,13 @@ def api_books():
     params = []
 
     if query:
-        where_parts.append("(LOWER(b.title) LIKE LOWER(?) OR LOWER(b.author) LIKE LOWER(?) OR LOWER(COALESCE(b.isbn,'')) LIKE LOWER(?) OR LOWER(b.book_id) LIKE LOWER(?))")
         like_q = f'%{query}%'
+        if _is_postgres_connection(conn):
+            # PostgreSQL: ILIKE is case-insensitive
+            where_parts.append("(b.title ILIKE ? OR b.author ILIKE ? OR COALESCE(b.isbn,'') ILIKE ? OR b.book_id ILIKE ?)")
+        else:
+            # SQLite: explicit NOCASE collation for deterministic behavior
+            where_parts.append("(b.title LIKE ? COLLATE NOCASE OR b.author LIKE ? COLLATE NOCASE OR COALESCE(b.isbn,'') LIKE ? COLLATE NOCASE OR b.book_id LIKE ? COLLATE NOCASE)")
         params.extend([like_q, like_q, like_q, like_q])
 
     if category and category != 'All':
