@@ -365,6 +365,21 @@ class Database:
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Shared runtime settings synced across local/cloud (e.g., fine_per_day)
+        self.create_table_safe(cursor, 'system_settings', '''
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''', sqlite_sql='''
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
         
@@ -1308,6 +1323,48 @@ class Database:
             return [row[0] for row in cursor.fetchall()]
         except:
             return []
+        finally:
+            conn.close()
+
+    def set_system_setting(self, key, value):
+        """Upsert a runtime setting and push it to cloud."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            sval = str(value)
+            cursor.execute('''
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (key, sval))
+            conn.commit()
+
+            self._push_to_cloud('''
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (key) DO UPDATE SET
+                    value=EXCLUDED.value,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (key, sval))
+            return True
+        except Exception as e:
+            print(f"Error setting system setting {key}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_system_setting(self, key, default=None):
+        """Get a runtime setting by key."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('SELECT value FROM system_settings WHERE key = ?', (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+        except Exception:
+            return default
         finally:
             conn.close()
 

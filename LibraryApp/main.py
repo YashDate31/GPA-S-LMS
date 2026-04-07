@@ -774,6 +774,11 @@ class LibraryApp:
         
         # Library settings (configurable fine, loan period, etc.)
         self.library_settings = self.load_library_settings()
+        # Mirror fine_per_day into synced DB settings so web portal can read same value.
+        try:
+            self.db.set_system_setting('fine_per_day', self.library_settings.get('fine_per_day', 5))
+        except Exception as e:
+            print(f"[Settings Sync] Failed to mirror fine_per_day on startup: {e}")
         
         # Start reminder email scheduler if enabled
         if self.email_settings.get('reminder_enabled', False):
@@ -905,6 +910,11 @@ class LibraryApp:
                 json.dump(settings, f, indent=4)
             # Update the instance variable
             self.library_settings = settings
+            # Mirror to shared DB settings for portal parity
+            try:
+                self.db.set_system_setting('fine_per_day', settings.get('fine_per_day', 5))
+            except Exception as e:
+                print(f"[Settings Sync] Failed to mirror fine_per_day: {e}")
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save library settings.\n\n{e}")

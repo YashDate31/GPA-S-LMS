@@ -141,7 +141,7 @@ class SyncManager:
             )
             
             # Library tables (bidirectional sync)
-            default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
+            default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'system_settings']
             default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
             default_portal_tables_push = ['notices', 'student_auth']
 
@@ -359,7 +359,8 @@ class SyncManager:
             'requests': 'req_id',
             'notices': 'id',
             'academic_years': 'id',
-            'promotion_history': 'id'
+            'promotion_history': 'id',
+            'system_settings': 'key'
         }
         return pk_map.get(table_name, 'id')
     
@@ -675,7 +676,7 @@ class SyncManager:
                     cycle_count += 1
                     # Periodic sync: use a lighter table set to avoid re-pulling the heavy books table.
                     # Full sync still happens on startup/manual sync.
-                    light_tables = ['students', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'requests', 'deletion_requests', 'student_auth', 'notices']
+                    light_tables = ['students', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'system_settings', 'requests', 'deletion_requests', 'student_auth', 'notices']
                     tables_for_run = list(light_tables)
                     # Every 4th cycle, include books for eventual consistency
                     if cycle_count % 4 == 0:
