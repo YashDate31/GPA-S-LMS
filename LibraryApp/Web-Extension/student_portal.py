@@ -65,7 +65,27 @@ REGISTRATION_PHOTO_FOLDER = os.path.join(BASE_DIR, 'uploads', 'registration_phot
 ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'jpg', 'jpeg', 'png', 'zip', 'rar'}
 ALLOWED_PHOTO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 MAX_PHOTO_BYTES = 50 * 1024  # 50KB
-FINE_PER_DAY = 1  # Keep portal fine math aligned with desktop app
+
+
+def _load_portal_fine_per_day():
+    """Load the shared fine-per-day setting used by the desktop app."""
+    default_fine = 1
+    try:
+        if getattr(sys, 'frozen', False):
+            settings_path = os.path.join(os.path.dirname(sys.executable), 'library_settings.json')
+        else:
+            settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'library_settings.json')
+
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+            return int(settings.get('fine_per_day', default_fine))
+    except Exception as e:
+        print(f"[Portal] Using default fine per day ({default_fine}) due to settings load error: {e}")
+    return default_fine
+
+
+FINE_PER_DAY = _load_portal_fine_per_day()
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
