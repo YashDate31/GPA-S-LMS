@@ -48,8 +48,8 @@ LibraryApp/library_settings.json
 LibraryApp/app_config.json
 
 # Environment files
-.env
-.env.*
+#.env
+#.env.*
 
 # Secret keys
 *.secret_key
