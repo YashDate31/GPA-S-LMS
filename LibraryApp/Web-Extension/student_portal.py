@@ -1999,7 +1999,7 @@ def api_alerts():
     
     # Check for active borrows only - fast query
     cursor.execute("""
-        SELECT b.title, br.due_date
+        SELECT b.title, br.due_date, COALESCE(br.fine, 0) as fine
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ? AND br.status = 'borrowed'
@@ -2022,7 +2022,9 @@ def api_alerts():
                 if delta < 0:
                     overdue_count += 1
                     days_late = abs(delta)
-                    total_fine += days_late * fine_per_day
+                    stored_fine = int(row['fine'] or 0)
+                    computed_fine = days_late * fine_per_day
+                    total_fine += max(stored_fine, computed_fine)
                     overdue_titles.append(row['title'])
             except:
                 pass
@@ -2086,7 +2088,7 @@ def api_dashboard():
     
     # Active Loans
     cursor.execute("""
-        SELECT b.title, b.author, br.borrow_date, br.due_date, br.book_id, br.accession_no
+        SELECT b.title, b.author, br.borrow_date, br.due_date, br.book_id, br.accession_no, COALESCE(br.fine, 0) as fine
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ? AND br.status = 'borrowed'
@@ -2147,7 +2149,9 @@ def api_dashboard():
                     item['status'] = 'overdue'
                     overdue_days = abs(delta)
                     item['days_msg'] = f"Overdue by {overdue_days} days"
-                    item['fine'] = overdue_days * fine_per_day
+                    stored_fine = int(item.get('fine') or 0)
+                    computed_fine = overdue_days * fine_per_day
+                    item['fine'] = max(stored_fine, computed_fine)
                     notifications.append({
                         'type': 'danger',
                         'msg': f"'{item['title']}' is OVERDUE! Fine: ₹{item['fine']}"
