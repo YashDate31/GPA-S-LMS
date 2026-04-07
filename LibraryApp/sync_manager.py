@@ -35,7 +35,28 @@ class SyncManager:
         self.remote_config = remote_config
         self.sync_log_path = os.path.join(os.path.dirname(local_db_path), 'sync_log.json')
         self.is_syncing = False
+        self._sync_lock = threading.Lock()
         self.last_sync_time = self._load_last_sync_time()
+        # Adaptive retry/backoff state for unstable networks/cloud outages
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.backoff_base_seconds = 30
+        self.backoff_max_seconds = 15 * 60
+
+    def _compute_backoff_seconds(self):
+        """Exponential backoff capped at backoff_max_seconds."""
+        if self.consecutive_failures <= 0:
+            return 0
+        # 30s, 60s, 120s, 240s... capped
+        return min(self.backoff_max_seconds, self.backoff_base_seconds * (2 ** (self.consecutive_failures - 1)))
+
+    def _register_sync_success(self):
+        self.consecutive_failures = 0
+        self.last_error = None
+
+    def _register_sync_failure(self, err_msg):
+        self.consecutive_failures += 1
+        self.last_error = str(err_msg)
         
     def _load_last_sync_time(self):
         """Load last sync timestamp from log"""
@@ -81,10 +102,11 @@ class SyncManager:
         Returns:
             Dictionary with sync statistics
         """
-        if self.is_syncing:
-            return {'success': False, 'error': 'Sync already in progress', 'records_synced': 0}
-        
-        self.is_syncing = True
+        with self._sync_lock:
+            if self.is_syncing:
+                return {'success': False, 'error': 'Sync already in progress', 'records_synced': 0}
+            self.is_syncing = True
+
         self._mark_sync_in_progress()  # Mark as in progress
         results = {
             'success': False,
@@ -94,17 +116,29 @@ class SyncManager:
             'records_synced': 0,
             'errors': []
         }
-        
+
+        local_conn = None
+        remote_conn = None
+
         try:
             if psycopg2 is None:
                 results['errors'].append(
                     "Remote sync requires 'psycopg2'. Install it (e.g., psycopg2-binary) and restart the app."
                 )
+                self._register_sync_failure(results['errors'][-1])
                 self._save_sync_time(status='failed')
                 return results
 
             local_conn = sqlite3.connect(self.local_db_path)
-            remote_conn = psycopg2.connect(self.remote_config)
+            # Fast failure on network problems + keepalive for unstable links
+            remote_conn = psycopg2.connect(
+                self.remote_config,
+                connect_timeout=8,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
+            )
             
             # Library tables (bidirectional sync)
             tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
@@ -179,22 +213,33 @@ class SyncManager:
             except Exception as e:
                 results['errors'].append(f"Portal sync: {str(e)}")
             
-            local_conn.close()
-            remote_conn.close()
-            
             results['success'] = len(results['errors']) == 0
             # Save sync time with status
             if results['success']:
+                self._register_sync_success()
                 self._save_sync_time(status='completed')
             else:
+                self._register_sync_failure('; '.join(results['errors']) if results['errors'] else 'sync errors')
                 self._save_sync_time(status='completed_with_errors')
             
         except Exception as e:
             results['errors'].append(f"Connection error: {str(e)}")
+            self._register_sync_failure(results['errors'][-1])
             self._save_sync_time(status='failed')
         
         finally:
-            self.is_syncing = False
+            try:
+                if local_conn is not None:
+                    local_conn.close()
+            except Exception:
+                pass
+            try:
+                if remote_conn is not None:
+                    remote_conn.close()
+            except Exception:
+                pass
+            with self._sync_lock:
+                self.is_syncing = False
         
         return results
     
@@ -604,19 +649,34 @@ class SyncManager:
                     print(f"[Auto-Sync] Initial pull had issues: {errors}")
             except Exception as e:
                 print(f"[Auto-Sync] Initial pull failed: {e}")
-
+            next_run_ts = time.time() + (interval_minutes * 60)
             while True:
-                time.sleep(interval_minutes * 60)
+                now = time.time()
+                if now < next_run_ts:
+                    # Short sleep keeps daemon responsive without busy loop
+                    time.sleep(min(5, max(1, next_run_ts - now)))
+                    continue
+
                 print(f"[Auto-Sync] Background sync at {datetime.now().strftime('%H:%M:%S')}")
                 try:
                     result = self.sync_now(direction='both')
                     if result.get('success'):
                         print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records synced")
+                        next_run_ts = time.time() + (interval_minutes * 60)
                     else:
                         errors = result.get('errors', result.get('error', 'Unknown'))
                         print(f"[Auto-Sync] Completed with issues: {errors}")
+                        backoff = self._compute_backoff_seconds()
+                        if backoff > 0:
+                            print(f"[Auto-Sync] Backoff active: retry in {backoff}s (failure #{self.consecutive_failures})")
+                        next_run_ts = time.time() + max(interval_minutes * 60, backoff)
                 except Exception as e:
                     print(f"[Auto-Sync] Exception: {e}")
+                    self._register_sync_failure(e)
+                    backoff = self._compute_backoff_seconds()
+                    if backoff > 0:
+                        print(f"[Auto-Sync] Backoff after exception: retry in {backoff}s")
+                    next_run_ts = time.time() + max(interval_minutes * 60, backoff)
         
         thread = threading.Thread(target=sync_loop, daemon=True)
         thread.start()
