@@ -7643,8 +7643,13 @@ Current Settings:
             # Apply type filter
             if type_filter != "All":
                 if type_filter == "Overdue":
-                    # Overdue means fine > 0
-                    if fine_val == 0 or fine_val == '0':
+                    # Overdue means borrowed and due_date has passed (independent of fine amount)
+                    try:
+                        due_obj = datetime.strptime(str(record[6]), '%Y-%m-%d').date()
+                        overdue_by_date = (str(status_val).lower() == 'borrowed' and due_obj < datetime.now().date())
+                    except Exception:
+                        overdue_by_date = False
+                    if not overdue_by_date:
                         continue
                 elif type_filter == "Issued":
                     if str(status_val).lower() != 'borrowed':
@@ -7945,8 +7950,15 @@ Current Settings:
                         fine_is_num = True
                     except ValueError:
                         pass
-                tag = 'late' if (fine_is_num and isinstance(fine, (int, float)) and fine > 0) else ''
-                if fine_is_num and isinstance(fine, (int, float)) and fine > 0:
+                # Determine overdue by due date, not by fine amount
+                try:
+                    due_obj = datetime.strptime(str(due_date), '%Y-%m-%d').date()
+                    overdue_by_date = (str(status).lower() == 'borrowed' and due_obj < datetime.now().date())
+                except Exception:
+                    overdue_by_date = False
+
+                tag = 'late' if overdue_by_date else ''
+                if fine_is_num and isinstance(fine, (int, float)) and overdue_by_date:
                     fine_display = f"Rs {int(fine)} (Late)"
                 else:
                     fine_display = f"Rs {int(fine)}" if fine_is_num else str(fine)
@@ -7974,16 +7986,16 @@ Current Settings:
             return
         
         # Extract record details (tree columns: Enrollment No, Student Name, Branch, Book ID, Book Title, Issue Date, Due Date, Return Date, Status, Fine)
-        enrollment_no = values[0]
-        student_name = values[1]
-        branch = values[2]
-        book_id = values[3]
-        book_title = values[4]
-        issue_date = values[5]
-        due_date = values[6]
-        return_date = values[7]
-        status = values[8]
-        fine_info = str(values[9])
+        enrollment_no = str(values[0]).strip()
+        student_name = str(values[1]).strip()
+        branch = str(values[2]).strip()
+        book_id = str(values[3]).strip()
+        book_title = str(values[4]).strip()
+        issue_date = str(values[5]).strip()
+        due_date = str(values[6]).strip()
+        return_date = str(values[7]).strip()
+        status = str(values[8]).strip()
+        fine_info = str(values[9]).strip()
         
         # Extract fine amount to check if overdue
         fine_amount = 0
@@ -7994,8 +8006,15 @@ Current Settings:
         except:
             fine_amount = 0
         
-        # Check if this is an overdue record (borrowed + fine > 0)
-        if status.lower() == 'borrowed' and fine_amount > 0:
+        # Check if this is an overdue record by due_date (independent of fine amount)
+        is_overdue = False
+        try:
+            due_obj = datetime.strptime(str(due_date), '%Y-%m-%d').date()
+            is_overdue = status.lower() == 'borrowed' and due_obj < datetime.now().date()
+        except Exception:
+            is_overdue = False
+
+        if is_overdue:
             # Show dialog to confirm sending letter
             response = messagebox.askyesno(
                 "Send Overdue Letter",
@@ -8028,6 +8047,16 @@ Current Settings:
             return
         
         try:
+            # Normalize values to safe strings (treeview may provide ints/floats)
+            enrollment_no = str(enrollment_no).strip()
+            student_name = str(student_name).strip()
+            book_id = str(book_id).strip()
+            book_title = str(book_title).strip()
+            issue_date = str(issue_date).strip()
+            due_date = str(due_date).strip()
+            fine_info = str(fine_info).strip()
+            branch = str(branch).strip() if branch is not None else ''
+
             # Get branch from DB if not provided
             if not branch:
                 try:
@@ -8049,7 +8078,7 @@ Current Settings:
             # Extract fine amount
             fine_amount = 0
             try:
-                fine_str = fine_info.replace('(Late)', '').strip()
+                fine_str = fine_info.replace('Rs', '').replace('(Late)', '').strip()
                 fine_amount = int(fine_str)
             except:
                 fine_amount = days_overdue * self.get_fine_per_day()
