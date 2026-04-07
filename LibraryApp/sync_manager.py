@@ -142,7 +142,18 @@ class SyncManager:
             
             # Library tables (bidirectional sync)
             default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history']
-            tables_to_sync = tables_override or default_tables_to_sync
+            default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
+            default_portal_tables_push = ['notices', 'student_auth']
+
+            if tables_override:
+                requested = set(tables_override)
+                tables_to_sync = [t for t in default_tables_to_sync if t in requested]
+                portal_tables_pull = [t for t in default_portal_tables_pull if t in requested]
+                portal_tables_push = [t for t in default_portal_tables_push if t in requested]
+            else:
+                tables_to_sync = default_tables_to_sync
+                portal_tables_pull = default_portal_tables_pull
+                portal_tables_push = default_portal_tables_push
             
             for idx, table in enumerate(tables_to_sync):
                 if progress_callback:
@@ -175,11 +186,10 @@ class SyncManager:
                     portal_conn.row_factory = sqlite3.Row
                     
                     # Tables to sync FROM cloud TO local (student submissions + auth)
-                    default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
-                    portal_tables_pull = [t for t in (tables_override or default_portal_tables_pull) if t in default_portal_tables_pull]
                     for idx, table in enumerate(portal_tables_pull):
                         if progress_callback:
-                            progress = 50 + ((idx + 1) / len(portal_tables_pull)) * 25
+                            denom = max(1, len(portal_tables_pull))
+                            progress = 50 + ((idx + 1) / denom) * 25
                             progress_callback(f"portal.{table}", progress)
                         
                         try:
@@ -194,11 +204,10 @@ class SyncManager:
                             results['errors'].append(f"portal.{table}: {str(e)}")
                     
                     # Tables to sync FROM local TO cloud (admin broadcasts + auth)
-                    default_portal_tables_push = ['notices', 'student_auth']
-                    portal_tables_push = [t for t in (tables_override or default_portal_tables_push) if t in default_portal_tables_push]
                     for idx, table in enumerate(portal_tables_push):
                         if progress_callback:
-                            progress = 75 + ((idx + 1) / len(portal_tables_push)) * 25
+                            denom = max(1, len(portal_tables_push))
+                            progress = 75 + ((idx + 1) / denom) * 25
                             progress_callback(f"portal.{table} (push)", progress)
                         
                         try:
@@ -653,6 +662,7 @@ class SyncManager:
             except Exception as e:
                 print(f"[Auto-Sync] Initial pull failed: {e}")
             next_run_ts = time.time() + (interval_minutes * 60)
+            cycle_count = 0
             while True:
                 now = time.time()
                 if now < next_run_ts:
@@ -662,10 +672,15 @@ class SyncManager:
 
                 print(f"[Auto-Sync] Background sync at {datetime.now().strftime('%H:%M:%S')}")
                 try:
+                    cycle_count += 1
                     # Periodic sync: use a lighter table set to avoid re-pulling the heavy books table.
                     # Full sync still happens on startup/manual sync.
                     light_tables = ['students', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'requests', 'deletion_requests', 'student_auth', 'notices']
-                    result = self.sync_now(direction='both', tables_override=light_tables)
+                    tables_for_run = list(light_tables)
+                    # Every 4th cycle, include books for eventual consistency
+                    if cycle_count % 4 == 0:
+                        tables_for_run.insert(1, 'books')
+                    result = self.sync_now(direction='both', tables_override=tables_for_run)
                     if result.get('success'):
                         print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records synced")
                         next_run_ts = time.time() + (interval_minutes * 60)
