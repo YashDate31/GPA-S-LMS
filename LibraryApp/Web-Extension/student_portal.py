@@ -2779,7 +2779,7 @@ def api_books():
     params = []
 
     if query:
-        where_parts.append("(b.title LIKE ? OR b.author LIKE ? OR COALESCE(b.isbn,'') LIKE ? OR b.book_id LIKE ?)")
+        where_parts.append("(LOWER(b.title) LIKE LOWER(?) OR LOWER(b.author) LIKE LOWER(?) OR LOWER(COALESCE(b.isbn,'')) LIKE LOWER(?) OR LOWER(b.book_id) LIKE LOWER(?))")
         like_q = f'%{query}%'
         params.extend([like_q, like_q, like_q, like_q])
 
