@@ -260,6 +260,17 @@ class SyncManager:
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
+
+            # Ensure remote table exists for shared runtime settings
+            if table_name == 'system_settings':
+                remote_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS system_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                remote_conn.commit()
             
             # Get records modified since last sync
             local_cursor.execute(f"SELECT * FROM {table_name}")
@@ -317,6 +328,17 @@ class SyncManager:
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
+
+            # Ensure local table exists for shared runtime settings
+            if table_name == 'system_settings':
+                local_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS system_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                local_conn.commit()
             
             # Get records from remote
             remote_cursor.execute(f"SELECT * FROM {table_name}")

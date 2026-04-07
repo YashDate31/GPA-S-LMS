@@ -148,6 +148,22 @@ ADMIN_USERNAME = "gpa"
 ADMIN_PASSWORD = "gpa123"
 
 class LibraryApp:
+    def _sync_runtime_settings_now(self):
+        """Best-effort fast push of system settings to cloud (non-blocking)."""
+        try:
+            if not getattr(self, 'sync_manager', None):
+                return
+
+            def _do_sync_settings():
+                try:
+                    self.sync_manager.sync_now(direction='local_to_remote', tables_override=['system_settings'])
+                except Exception as e:
+                    print(f"[Settings Sync] Immediate settings sync failed: {e}")
+
+            threading.Thread(target=_do_sync_settings, daemon=True).start()
+        except Exception as e:
+            print(f"[Settings Sync] Unable to start immediate settings sync: {e}")
+
     def run_in_background_thread(self, target, callback, **kwargs):
         """Helper to run a function in a background thread and callback on main thread."""
         def wrapper():
@@ -777,6 +793,7 @@ class LibraryApp:
         # Mirror fine_per_day into synced DB settings so web portal can read same value.
         try:
             self.db.set_system_setting('fine_per_day', self.library_settings.get('fine_per_day', 5))
+            self._sync_runtime_settings_now()
         except Exception as e:
             print(f"[Settings Sync] Failed to mirror fine_per_day on startup: {e}")
         
@@ -913,6 +930,7 @@ class LibraryApp:
             # Mirror to shared DB settings for portal parity
             try:
                 self.db.set_system_setting('fine_per_day', settings.get('fine_per_day', 5))
+                self._sync_runtime_settings_now()
             except Exception as e:
                 print(f"[Settings Sync] Failed to mirror fine_per_day: {e}")
             return True

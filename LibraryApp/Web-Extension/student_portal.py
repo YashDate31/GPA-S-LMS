@@ -107,14 +107,25 @@ def get_portal_fine_per_day():
     except Exception:
         pass
 
-    # 2) Local file fallback (desktop script/exe mode)
+    # 2) On server (Render), DO NOT use local file fallback (can be stale).
+    if os.getenv('RENDER') or os.getenv('IS_SERVER'):
+        env_fine = os.getenv('FINE_PER_DAY')
+        if env_fine is not None:
+            try:
+                _fine_cache['value'] = int(float(env_fine))
+            except Exception:
+                _fine_cache['value'] = default_fine
+        _fine_cache['last_checked'] = now_ts
+        return _fine_cache.get('value', default_fine) or default_fine
+
+    # 3) Local file fallback (desktop script/exe mode)
     settings_path = _get_library_settings_path()
     _fine_cache['path'] = settings_path
 
     try:
         mtime = os.path.getmtime(settings_path)
     except Exception:
-        # 3) Environment fallback
+        # 4) Environment fallback
         env_fine = os.getenv('FINE_PER_DAY')
         if env_fine is not None:
             try:
