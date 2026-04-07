@@ -46,6 +46,7 @@ _portal_pool_lock = threading.Lock()
 _portal_pool_failed = False  # Track if pool init already failed
 _portal_cloud_fail_time = 0  # Timestamp of last cloud failure (retry after cooldown)
 _PORTAL_CLOUD_RETRY_COOLDOWN = 60  # Retry cloud DB after 60 seconds
+_library_schema_checked = False
 
 
 # --- Configuration ---
@@ -746,8 +747,76 @@ def get_db_connection(local_db_name):
     conn.row_factory = sqlite3.Row
     return conn
 
+def _ensure_local_library_schema():
+    """Create core local library tables if missing.
+    Prevents login failures like 'no such table: students' after fresh DB clears."""
+    global _library_schema_checked
+
+    if _library_schema_checked:
+        return
+
+    # Only for desktop/local SQLite mode
+    is_server_deploy = os.getenv('RENDER') or os.getenv('IS_SERVER')
+    if is_server_deploy:
+        _library_schema_checked = True
+        return
+
+    lib_path = os.path.join(os.path.dirname(BASE_DIR), 'library.db')
+    conn = sqlite3.connect(lib_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                enrollment_no TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                department TEXT,
+                year TEXT,
+                date_registered DATE DEFAULT CURRENT_DATE
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                isbn TEXT,
+                category TEXT,
+                total_copies INTEGER DEFAULT 1,
+                available_copies INTEGER DEFAULT 1,
+                date_added DATE DEFAULT CURRENT_DATE,
+                barcode TEXT,
+                price REAL DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS borrow_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                enrollment_no TEXT NOT NULL,
+                book_id TEXT NOT NULL,
+                borrow_date DATE NOT NULL,
+                due_date DATE NOT NULL,
+                return_date DATE,
+                status TEXT DEFAULT 'borrowed',
+                fine INTEGER DEFAULT 0,
+                academic_year TEXT,
+                FOREIGN KEY (enrollment_no) REFERENCES students (enrollment_no) ON DELETE RESTRICT ON UPDATE CASCADE,
+                FOREIGN KEY (book_id) REFERENCES books (book_id) ON DELETE RESTRICT ON UPDATE CASCADE
+            )
+        ''')
+        conn.commit()
+        _library_schema_checked = True
+    except Exception as e:
+        print(f"[Schema Init] local library schema check failed: {e}")
+    finally:
+        conn.close()
+
 def get_library_db():
     """Read-Only Connection to Core Data"""
+    _ensure_local_library_schema()
     # If generic DB is used, both library and portal data are in the same Postgres DB
     return get_db_connection('library.db')
 
