@@ -103,6 +103,83 @@ class SyncManager:
             return cutoff.strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             return None
+
+    def _ensure_remote_table_columns(self, local_conn, remote_conn, table_name):
+        """Add missing remote columns so cloud sync can accept the local schema.
+
+        This keeps Supabase aligned with SQLite when additive migrations are made
+        locally (for example, the `updated_at` column used by delta sync).
+        """
+        try:
+            remote_cursor = remote_conn.cursor()
+
+            remote_cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = %s
+                )
+            """, (table_name,))
+            if not remote_cursor.fetchone()[0]:
+                # Only auto-create the shared runtime settings table here; the
+                # remaining core tables are expected to exist already.
+                if table_name == 'system_settings':
+                    remote_cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS system_settings (
+                            key TEXT PRIMARY KEY,
+                            value TEXT,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    remote_conn.commit()
+                return
+
+            local_cursor = local_conn.cursor()
+            local_cursor.execute(f"PRAGMA table_info({table_name})")
+            local_columns = local_cursor.fetchall()
+            if not local_columns:
+                return
+
+            remote_cursor.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = %s
+            """, (table_name,))
+            remote_columns = {str(row[0]).lower() for row in remote_cursor.fetchall()}
+
+            primary_key = self._get_primary_key(table_name).lower()
+            added_any = False
+
+            for col in local_columns:
+                col_name = str(col[1])
+                col_name_lower = col_name.lower()
+                if col_name_lower in remote_columns:
+                    continue
+                if col_name_lower == primary_key:
+                    continue
+
+                col_type = str(col[2] or '').strip().upper() or 'TEXT'
+                if col_name_lower == 'updated_at':
+                    col_def = 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+                else:
+                    col_def = col_type
+
+                try:
+                    remote_cursor.execute(f'ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}')
+                    if col_name_lower == 'updated_at':
+                        try:
+                            remote_cursor.execute(
+                                f'UPDATE {table_name} SET {col_name} = CURRENT_TIMESTAMP WHERE {col_name} IS NULL'
+                            )
+                        except Exception:
+                            pass
+                    added_any = True
+                except Exception as e:
+                    print(f"[Schema Sync] Could not add {table_name}.{col_name}: {e}")
+
+            if added_any:
+                remote_conn.commit()
+        except Exception as e:
+            print(f"[Schema Sync] Failed for {table_name}: {e}")
     
     def sync_now(self, direction='both', progress_callback=None, tables_override=None):
         """
@@ -274,6 +351,9 @@ class SyncManager:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
             cutoff = self._get_sync_cutoff()
+
+            # Keep the remote schema aligned with the local schema before upserts.
+            self._ensure_remote_table_columns(local_conn, remote_conn, table_name)
 
             # Ensure remote table exists for shared runtime settings
             if table_name == 'system_settings':
@@ -562,6 +642,9 @@ class SyncManager:
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
+
+            # Keep the remote portal schema aligned before pushing rows.
+            self._ensure_remote_table_columns(local_conn, remote_conn, table_name)
             
             # Check if table exists remotely
             remote_cursor.execute("""
