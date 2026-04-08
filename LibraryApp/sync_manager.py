@@ -71,12 +71,15 @@ class SyncManager:
     
     def _save_sync_time(self, status='completed'):
         """Save current sync timestamp"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
             with open(self.sync_log_path, 'w') as f:
                 json.dump({
-                    'last_sync': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'last_sync': timestamp,
                     'status': status
                 }, f, indent=4)
+            if status in ('completed', 'completed_with_errors'):
+                self.last_sync_time = timestamp
         except Exception as e:
             print(f"Error saving sync time: {e}")
     
@@ -90,6 +93,16 @@ class SyncManager:
                 }, f, indent=4)
         except Exception as e:
             print(f"Error marking sync in progress: {e}")
+
+    def _get_sync_cutoff(self):
+        """Return the last successful sync timestamp string for incremental sync queries."""
+        try:
+            cutoff = datetime.strptime(self.last_sync_time, '%Y-%m-%d %H:%M:%S')
+            if cutoff.year <= 2000:
+                return None
+            return cutoff.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return None
     
     def sync_now(self, direction='both', progress_callback=None, tables_override=None):
         """
@@ -260,6 +273,7 @@ class SyncManager:
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
+            cutoff = self._get_sync_cutoff()
 
             # Ensure remote table exists for shared runtime settings
             if table_name == 'system_settings':
@@ -273,7 +287,17 @@ class SyncManager:
                 remote_conn.commit()
             
             # Get records modified since last sync
-            local_cursor.execute(f"SELECT * FROM {table_name}")
+            has_updated_at = False
+            try:
+                local_cursor.execute(f"PRAGMA table_info({table_name})")
+                has_updated_at = any(str(col[1]).lower() == 'updated_at' for col in local_cursor.fetchall())
+            except Exception:
+                has_updated_at = False
+
+            if cutoff and has_updated_at:
+                local_cursor.execute(f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > ?", (cutoff,))
+            else:
+                local_cursor.execute(f"SELECT * FROM {table_name}")
             rows = local_cursor.fetchall()
             
             if not rows:
@@ -328,6 +352,7 @@ class SyncManager:
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
+            cutoff = self._get_sync_cutoff()
 
             # Ensure local table exists for shared runtime settings
             if table_name == 'system_settings':
@@ -341,7 +366,19 @@ class SyncManager:
                 local_conn.commit()
             
             # Get records from remote
-            remote_cursor.execute(f"SELECT * FROM {table_name}")
+            try:
+                remote_cursor.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = %s
+                """, (table_name,))
+                has_updated_at = any(str(r[0]).lower() == 'updated_at' for r in remote_cursor.fetchall())
+            except Exception:
+                has_updated_at = False
+
+            if cutoff and has_updated_at:
+                remote_cursor.execute(f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > %s", (cutoff,))
+            else:
+                remote_cursor.execute(f"SELECT * FROM {table_name}")
             rows = remote_cursor.fetchall()
             
             if not rows:
