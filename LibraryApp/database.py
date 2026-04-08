@@ -216,7 +216,8 @@ class Database:
                 phone TEXT,
                 department TEXT,
                 year TEXT,
-                date_registered DATE DEFAULT CURRENT_DATE
+                date_registered DATE DEFAULT CURRENT_DATE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''', sqlite_sql='''
             CREATE TABLE IF NOT EXISTS students (
@@ -227,7 +228,8 @@ class Database:
                 phone TEXT,
                 department TEXT,
                 year TEXT,
-                date_registered DATE DEFAULT CURRENT_DATE
+                date_registered DATE DEFAULT CURRENT_DATE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -243,7 +245,8 @@ class Database:
                 available_copies INTEGER DEFAULT 1,
                 date_added DATE DEFAULT CURRENT_DATE,
                 barcode TEXT,
-                price REAL DEFAULT 0
+                price REAL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''', sqlite_sql='''
              CREATE TABLE IF NOT EXISTS books (
@@ -257,7 +260,8 @@ class Database:
                 available_copies INTEGER DEFAULT 1,
                 date_added DATE DEFAULT CURRENT_DATE,
                 barcode TEXT,
-                price REAL DEFAULT 0
+                price REAL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -301,6 +305,7 @@ class Database:
                 status TEXT DEFAULT 'borrowed',
                 fine INTEGER DEFAULT 0,
                 academic_year TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (enrollment_no) REFERENCES students (enrollment_no) ON DELETE RESTRICT ON UPDATE CASCADE,
                 FOREIGN KEY (book_id) REFERENCES books (book_id) ON DELETE RESTRICT ON UPDATE CASCADE
             )
@@ -315,6 +320,7 @@ class Database:
                 status TEXT DEFAULT 'borrowed',
                 fine INTEGER DEFAULT 0,
                 academic_year TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (enrollment_no) REFERENCES students (enrollment_no) ON DELETE RESTRICT ON UPDATE CASCADE,
                 FOREIGN KEY (book_id) REFERENCES books (book_id) ON DELETE RESTRICT ON UPDATE CASCADE
             )
@@ -330,6 +336,7 @@ class Database:
                 letter_number TEXT,
                 academic_year TEXT,
                 promotion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (enrollment_no) REFERENCES students (enrollment_no) ON DELETE RESTRICT ON UPDATE CASCADE
             )
         ''', sqlite_sql='''
@@ -342,6 +349,7 @@ class Database:
                 letter_number TEXT,
                 academic_year TEXT,
                 promotion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (enrollment_no) REFERENCES students (enrollment_no) ON DELETE RESTRICT ON UPDATE CASCADE
             )
         ''')
@@ -353,7 +361,8 @@ class Database:
                 start_date DATE,
                 end_date DATE,
                 is_active INTEGER DEFAULT 0,
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''', sqlite_sql='''
              CREATE TABLE IF NOT EXISTS academic_years (
@@ -362,7 +371,8 @@ class Database:
                 start_date DATE,
                 end_date DATE,
                 is_active INTEGER DEFAULT 0,
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
@@ -504,6 +514,33 @@ class Database:
         except Exception as e:
             print(f"Migration check warning (price): {e}")
 
+        # Migration: ensure updated_at exists on tables used for delta sync
+        for table_name in ('students', 'books', 'borrow_records', 'promotion_history', 'academic_years'):
+            try:
+                has_updated_at = False
+                if self.use_cloud:
+                    cursor.execute(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name=? AND column_name='updated_at'",
+                        (table_name,)
+                    )
+                    if cursor.fetchone():
+                        has_updated_at = True
+                else:
+                    cursor.execute(f"PRAGMA table_info({table_name})")
+                    columns = [col[1] for col in cursor.fetchall()]
+                    has_updated_at = 'updated_at' in columns
+
+                if not has_updated_at:
+                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN updated_at TIMESTAMP")
+                    try:
+                        cursor.execute(f"UPDATE {table_name} SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
+                    except Exception:
+                        pass
+                    conn.commit()
+                    print(f"Migration: Added 'updated_at' column to {table_name} table")
+            except Exception as e:
+                print(f"Migration check warning (updated_at:{table_name}): {e}")
+
         # Migration: ensure accession_no column exists on borrow_records
         # Stores the originally-entered book identifier (individual accession number)
         # so display shows e.g. "5" instead of the range "5-14" stored in book_id
@@ -579,7 +616,7 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (enrollment_no) DO UPDATE SET
                     name=EXCLUDED.name, email=EXCLUDED.email, phone=EXCLUDED.phone,
-                    department=EXCLUDED.department, year=EXCLUDED.year
+                    department=EXCLUDED.department, year=EXCLUDED.year, updated_at=CURRENT_TIMESTAMP
             ''', (enrollment_no, name, email, phone, department, year))
             return True, "Student added successfully"
         except sqlite3.IntegrityError:
@@ -602,12 +639,12 @@ class Database:
             # Update student information
             cursor.execute('''
                 UPDATE students 
-                SET name=?, email=?, phone=?, department=?, year=?
+                SET name=?, email=?, phone=?, department=?, year=?, updated_at=CURRENT_TIMESTAMP
                 WHERE enrollment_no=?
             ''', (name, email, phone, department, year, enrollment_no))
             conn.commit()
             self._push_to_cloud('''
-                UPDATE students SET name=?, email=?, phone=?, department=?, year=?
+                UPDATE students SET name=?, email=?, phone=?, department=?, year=?, updated_at=CURRENT_TIMESTAMP
                 WHERE enrollment_no=?
             ''', (name, email, phone, department, year, enrollment_no))
             return True, "Student updated successfully"
@@ -674,7 +711,7 @@ class Database:
                 ON CONFLICT (book_id) DO UPDATE SET
                     title=EXCLUDED.title, author=EXCLUDED.author, isbn=EXCLUDED.isbn,
                     category=EXCLUDED.category, total_copies=EXCLUDED.total_copies,
-                    available_copies=EXCLUDED.available_copies, barcode=EXCLUDED.barcode, price=EXCLUDED.price
+                    available_copies=EXCLUDED.available_copies, barcode=EXCLUDED.barcode, price=EXCLUDED.price, updated_at=CURRENT_TIMESTAMP
             ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
             return True, "Book added successfully"
         except sqlite3.IntegrityError:
@@ -708,14 +745,14 @@ class Database:
             # Update book information
             cursor.execute('''
                 UPDATE books 
-                SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?
+                SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP
                 WHERE book_id=?
             ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
             conn.commit()
             
             # Push to cloud
             self._push_to_cloud('''
-                UPDATE books SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?
+                UPDATE books SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP
                 WHERE book_id=?
             ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
             
@@ -816,7 +853,7 @@ class Database:
             
             # Update available copies
             cursor.execute('''
-                UPDATE books SET available_copies = available_copies - 1 
+                UPDATE books SET available_copies = available_copies - 1, updated_at=CURRENT_TIMESTAMP 
                 WHERE book_id = ?
             ''', (book_id,))
             
@@ -827,7 +864,7 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year))
             self._push_to_cloud('''
-                UPDATE books SET available_copies = available_copies - 1 WHERE book_id = ?
+                UPDATE books SET available_copies = available_copies - 1, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?
             ''', (book_id,))
             return True, "Book borrowed successfully"
         except Exception as e:
@@ -858,7 +895,7 @@ class Database:
 
             cursor.execute('''
                 UPDATE borrow_records 
-                SET return_date = ?, status = 'returned'
+                SET return_date = ?, status = 'returned', updated_at=CURRENT_TIMESTAMP
                 WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
             ''', (return_date, enrollment_no, book_id))
             
@@ -867,7 +904,7 @@ class Database:
             
             # Update available copies
             cursor.execute('''
-                UPDATE books SET available_copies = available_copies + 1 
+                UPDATE books SET available_copies = available_copies + 1, updated_at=CURRENT_TIMESTAMP 
                 WHERE book_id = ?
             ''', (book_id,))
             
@@ -875,11 +912,11 @@ class Database:
             
             # Push return to cloud
             self._push_to_cloud('''
-                UPDATE borrow_records SET return_date = ?, status = 'returned'
+                UPDATE borrow_records SET return_date = ?, status = 'returned', updated_at=CURRENT_TIMESTAMP
                 WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
             ''', (return_date, enrollment_no, book_id))
             self._push_to_cloud('''
-                UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?
+                UPDATE books SET available_copies = available_copies + 1, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?
             ''', (book_id,))
             
             # Notify waitlist - get book title for notification
@@ -1344,10 +1381,10 @@ class Database:
         except sqlite3.IntegrityError:
             # Year already exists, just activate it
             cursor.execute('''
-                UPDATE academic_years SET is_active = 1 WHERE year_name = ?
+                UPDATE academic_years SET is_active = 1, updated_at=CURRENT_TIMESTAMP WHERE year_name = ?
             ''', (year_name,))
             cursor.execute('''
-                UPDATE academic_years SET is_active = 0 WHERE year_name != ?
+                UPDATE academic_years SET is_active = 0, updated_at=CURRENT_TIMESTAMP WHERE year_name != ?
             ''', (year_name,))
             conn.commit()
             return True, f"Academic year {year_name} activated"
