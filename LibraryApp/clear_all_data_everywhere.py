@@ -14,18 +14,15 @@ from pathlib import Path
 def _load_env(repo_root: Path) -> None:
     env_path = repo_root / ".env"
 
-    # First try python-dotenv if available
     try:
         from dotenv import load_dotenv  # type: ignore
         if env_path.exists():
             load_dotenv(env_path)
         else:
-            # Fallback search (same idea used in main.py)
             load_dotenv()
     except Exception:
         pass
 
-    # Fallback manual parser (works even if python-dotenv is not installed)
     if env_path.exists():
         try:
             for raw_line in env_path.read_text(encoding="utf-8").splitlines():
@@ -49,10 +46,7 @@ def _wipe_sqlite(db_path: Path, label: str) -> tuple[bool, str]:
     try:
         cur = conn.cursor()
         cur.execute("PRAGMA foreign_keys = OFF;")
-
-        cur.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
         tables = [r[0] for r in cur.fetchall()]
 
         for t in tables:
@@ -67,7 +61,7 @@ def _wipe_sqlite(db_path: Path, label: str) -> tuple[bool, str]:
         conn.close()
 
 
-def _wipe_supabase(repo_root: Path) -> tuple[bool, str]:
+def _wipe_supabase() -> tuple[bool, str]:
     db_url = os.getenv("DATABASE_URL", "").strip()
     if not db_url:
         return False, "Supabase: DATABASE_URL is missing"
@@ -97,7 +91,7 @@ def _wipe_supabase(repo_root: Path) -> tuple[bool, str]:
     conn = None
     try:
         conn = psycopg2.connect(db_url)
-        conn.autocommit = False
+        conn.autocommit = True
         cur = conn.cursor()
 
         cur.execute(
@@ -112,27 +106,29 @@ def _wipe_supabase(repo_root: Path) -> tuple[bool, str]:
         to_clear = [t for t in target_tables if t in existing]
 
         if not to_clear:
-            conn.commit()
             return True, "Supabase: no target tables found"
 
-        table_list = ", ".join(f'"public"."{t}"' for t in to_clear)
+        cleared = 0
+        for t in to_clear:
+            try:
+                cur.execute(f'TRUNCATE TABLE "public"."{t}" RESTART IDENTITY CASCADE')
+                cleared += 1
+            except Exception:
+                try:
+                    cur.execute(f'DELETE FROM "public"."{t}"')
+                    cleared += 1
+                except Exception:
+                    continue
 
-        try:
-            cur.execute(f"TRUNCATE TABLE {table_list} RESTART IDENTITY CASCADE")
-        except Exception:
-            conn.rollback()
-            for t in to_clear:
-                cur.execute(f'DELETE FROM "public"."{t}"')
-
-        conn.commit()
-        return True, f"Supabase: cleared {len(to_clear)} tables"
+        return True, f"Supabase: cleared {cleared} tables"
     except Exception as e:
-        if conn:
-            conn.rollback()
         return False, f"Supabase: failed - {e}"
     finally:
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def main() -> int:
@@ -153,7 +149,7 @@ def main() -> int:
     ok2, msg2 = _wipe_sqlite(local_portal_db, "Local portal.db")
     print(msg2)
 
-    ok3, msg3 = _wipe_supabase(repo_root)
+    ok3, msg3 = _wipe_supabase()
     print(msg3)
 
     if ok1 and ok2 and ok3:
