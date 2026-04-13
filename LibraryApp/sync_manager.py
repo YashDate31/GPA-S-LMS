@@ -42,6 +42,8 @@ class SyncManager:
         self.last_error = None
         self.backoff_base_seconds = 30
         self.backoff_max_seconds = 15 * 60
+        # Schema cache: avoid repeated information_schema queries on every sync cycle
+        self._schema_cache = set()  # tables already ensured this session
 
     def _compute_backoff_seconds(self):
         """Exponential backoff capped at backoff_max_seconds."""
@@ -107,9 +109,11 @@ class SyncManager:
     def _ensure_remote_table_columns(self, local_conn, remote_conn, table_name):
         """Add missing remote columns so cloud sync can accept the local schema.
 
-        This keeps Supabase aligned with SQLite when additive migrations are made
-        locally (for example, the `updated_at` column used by delta sync).
+        Cached per SyncManager lifetime: only runs the expensive information_schema
+        queries once per table, not on every sync cycle.
         """
+        if table_name in self._schema_cache:
+            return  # Already checked this session — skip the expensive query
         try:
             remote_cursor = remote_conn.cursor()
 
@@ -178,6 +182,7 @@ class SyncManager:
 
             if added_any:
                 remote_conn.commit()
+            self._schema_cache.add(table_name)  # Cache: skip this table next sync cycle
         except Exception as e:
             print(f"[Schema Sync] Failed for {table_name}: {e}")
     
