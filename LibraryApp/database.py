@@ -678,6 +678,7 @@ class Database:
             conn.commit()
             
             if cursor.rowcount > 0:
+                # Push student delete immediately — web portal must stop allowing login
                 self._push_to_cloud("DELETE FROM students WHERE enrollment_no = ?", (enrollment_no,))
                 return True, f"Student '{student_name}' removed successfully"
             else:
@@ -705,14 +706,10 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
             conn.commit()
-            self._push_to_cloud('''
-                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (book_id) DO UPDATE SET
-                    title=EXCLUDED.title, author=EXCLUDED.author, isbn=EXCLUDED.isbn,
-                    category=EXCLUDED.category, total_copies=EXCLUDED.total_copies,
-                    available_copies=EXCLUDED.available_copies, barcode=EXCLUDED.barcode, price=EXCLUDED.price, updated_at=CURRENT_TIMESTAMP
-            ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
+            # NOTE: No immediate _push_to_cloud here.
+            # Bug fix: _push_to_cloud + SyncManager writing simultaneously caused race-condition
+            # duplicates in Supabase (Bug 2 + Bug 5). SyncManager periodic sync is the sole
+            # authoritative writer. Books will appear in Supabase within the next sync cycle.
             return True, "Book added successfully"
         except sqlite3.IntegrityError:
             return False, "Book ID already exists"
@@ -749,13 +746,8 @@ class Database:
                 WHERE book_id=?
             ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
             conn.commit()
-            
-            # Push to cloud
-            self._push_to_cloud('''
-                UPDATE books SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP
-                WHERE book_id=?
-            ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
-            
+            # NOTE: No immediate _push_to_cloud here (Bug 2 fix — see add_book).
+            # SyncManager will sync the update in the next periodic cycle.
             return True, "Book updated successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -858,14 +850,12 @@ class Database:
             ''', (book_id,))
             
             conn.commit()
-            # Push borrow record + copies update to cloud
-            self._push_to_cloud('''
-                INSERT INTO borrow_records (enrollment_no, book_id, accession_no, borrow_date, due_date, academic_year)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year))
-            self._push_to_cloud('''
-                UPDATE books SET available_copies = available_copies - 1, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?
-            ''', (book_id,))
+            # NOTE: No immediate _push_to_cloud for borrow records.
+            # Bug fix (Bug 1 + Bug 2): borrow_book was pushing without 'id', so Supabase
+            # auto-assigned a SERIAL id (e.g. 25). Then SyncManager synced with ON CONFLICT (id=5)
+            # from SQLite → Supabase found no row with id=5 → inserted a second row.
+            # Removing this push so ONLY SyncManager writes borrow_records to Supabase,
+            # using the natural key (enrollment_no, book_id, borrow_date).
             return True, "Book borrowed successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -909,15 +899,8 @@ class Database:
             ''', (book_id,))
             
             conn.commit()
-            
-            # Push return to cloud
-            self._push_to_cloud('''
-                UPDATE borrow_records SET return_date = ?, status = 'returned', updated_at=CURRENT_TIMESTAMP
-                WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
-            ''', (return_date, enrollment_no, book_id))
-            self._push_to_cloud('''
-                UPDATE books SET available_copies = available_copies + 1, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?
-            ''', (book_id,))
+            # NOTE: No immediate _push_to_cloud for return records (Bug 2 fix — see borrow_book).
+            # SyncManager will sync the status='returned' update in the next periodic cycle.
             
             # Notify waitlist - get book title for notification
             cursor.execute('SELECT title FROM books WHERE book_id = ?', (book_id,))
@@ -1207,13 +1190,11 @@ class Database:
                 return False, "Book not found"
             
             conn.commit()
-            
-            # Push dependency cleanup + delete to cloud (best-effort)
-            self._push_to_cloud('DELETE FROM borrow_records WHERE book_id = ? AND status != "borrowed"', (book_id,))
-            self._push_to_cloud('DELETE FROM transactions WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM book_waitlist WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM book_ratings WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM books WHERE book_id = ?', (book_id,))
+
+            # NOTE: No immediate _push_to_cloud for book/borrow deletes.
+            # DELETE operations carry lower duplication risk; SyncManager will propagate
+            # them in the next periodic cycle via the local→remote sync (rows will be
+            # absent locally and absent remotely after dedup migration).
             
             details = []
             if deleted_borrow_history > 0:
