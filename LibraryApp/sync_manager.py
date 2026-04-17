@@ -1100,12 +1100,34 @@ class SyncManager:
                 # No natural key → skip destructive mirror for safety (log/audit tables)
                 return 0
 
+            # ── SAFETY CHECK ────────────────────────────────────────────────
+            # If Supabase has 0 rows but local has significant data, the cloud
+            # was likely manually cleared (not legitimately empty). In that case
+            # push local UP to Supabase — never delete a full local dataset
+            # just because the cloud is empty.
+            if len(remote_rows) == 0:
+                local_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                local_count = local_cursor.fetchone()[0]
+                if local_count > 5:
+                    print(f"[Full Mirror] {table_name}: Supabase empty but local has {local_count} rows "
+                          f"— pushing local -> Supabase (cloud was cleared manually)")
+                    pushed = self._sync_table_local_to_remote(
+                        local_conn, remote_conn, table_name
+                    )
+                    remote_conn.commit()
+                    return pushed
+                else:
+                    # Both sides genuinely empty — nothing to do
+                    print(f"[Full Mirror] {table_name}: both local and Supabase empty — nothing to sync")
+                    return 0
+
             # Build set of remote natural keys
             remote_key_set = set()
             for row in remote_rows:
                 row_dict = dict(zip(all_remote_columns, row))
                 key = tuple(str(row_dict.get(k) or '').replace(' ', '') for k in natural_key)
                 remote_key_set.add(key)
+
 
             # Delete local rows NOT present in remote (cloud has authority)
             local_cursor.execute(f"SELECT * FROM {table_name}")
