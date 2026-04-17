@@ -2216,11 +2216,59 @@ def api_dashboard():
                 item['days_msg'] = '-'
         borrows.append(item)
 
-    # 3. Fetch Sandbox Data (Requests Status)
+    # 3. Fetch Sandbox Data (Requests Status) + Accurate Summary Counts
     conn_portal = get_portal_db()
     cursor_p = conn_portal.cursor()
     cursor_p.execute("SELECT * FROM requests WHERE enrollment_no = ? ORDER BY created_at DESC LIMIT 5", (enrollment,))
     requests = [dict(row) for row in cursor_p.fetchall()]
+
+    # --- Accurate stat counts (no LIMIT cap) ---
+    # Accurate returned count from library DB
+    conn_lib2 = get_library_db()
+    cursor_lib2 = conn_lib2.cursor()
+    cursor_lib2.execute(
+        "SELECT COUNT(*) as c FROM borrow_records WHERE enrollment_no = ? AND status = 'returned'",
+        (enrollment,)
+    )
+    _row = cursor_lib2.fetchone()
+    returned_count = (_row['c'] if _row and 'c' in _row.keys() else _row[0]) if _row else 0
+
+    # Accurate borrowed count
+    cursor_lib2.execute(
+        "SELECT COUNT(*) as c FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'",
+        (enrollment,)
+    )
+    _row = cursor_lib2.fetchone()
+    borrowed_count_db = (_row['c'] if _row and 'c' in _row.keys() else _row[0]) if _row else 0
+
+    # Total cumulative fine (including already-paid)
+    cursor_lib2.execute(
+        "SELECT COALESCE(SUM(fine), 0) as total FROM borrow_records WHERE enrollment_no = ? AND fine > 0",
+        (enrollment,)
+    )
+    _row = cursor_lib2.fetchone()
+    total_fine_ever = int((_row['total'] if _row and 'total' in _row.keys() else _row[0]) if _row else 0)
+    conn_lib2.close()
+
+    # Pending requests count
+    cursor_p.execute(
+        "SELECT COUNT(*) as c FROM requests WHERE enrollment_no = ? AND status = 'pending'",
+        (enrollment,)
+    )
+    _row = cursor_p.fetchone()
+    pending_requests_count = (_row['c'] if _row and 'c' in _row.keys() else _row[0]) if _row else 0
+
+    # Wishlist count
+    try:
+        cursor_p.execute(
+            "SELECT COUNT(*) as c FROM book_waitlist WHERE enrollment_no = ? AND notified = 0",
+            (enrollment,)
+        )
+        _row = cursor_p.fetchone()
+        wishlist_count = (_row['c'] if _row and 'c' in _row.keys() else _row[0]) if _row else 0
+    except Exception:
+        wishlist_count = 0
+
     conn_portal.close()
 
     # 4. Analytics & Gamification (Computed on Read-Only Data)
@@ -2269,6 +2317,8 @@ def api_dashboard():
         h['borrow_date'] = _to_iso_date(h.get('borrow_date'))
         h['return_date'] = _to_iso_date(h.get('return_date'))
 
+    active_fine = sum(b.get('fine', 0) for b in borrows if b.get('status') == 'overdue')
+
     return jsonify({
         'borrows': borrows,
         'history': history,
@@ -2278,6 +2328,15 @@ def api_dashboard():
         'analytics': {
             'stats': stats,
             'badges': badges
+        },
+        'summary': {
+            'borrowed_count': borrowed_count_db,
+            'returned_count': returned_count,
+            'overdue_count': len([b for b in borrows if b.get('status') == 'overdue']),
+            'pending_requests_count': pending_requests_count,
+            'wishlist_count': wishlist_count,
+            'active_fine': int(active_fine),
+            'total_fine_ever': total_fine_ever,
         }
     })
 

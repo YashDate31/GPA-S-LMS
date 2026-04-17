@@ -49,7 +49,7 @@ export default function Layout({ user, setUser }) {
 
   // Notifications State
   const [unreadCount, setUnreadCount] = useState(0);
-  const POLL_INTERVAL = 10000; // 10 seconds
+  const POLL_INTERVAL = 30000; // 30 seconds
 
   useEffect(() => {
     const fetchUnread = async () => {

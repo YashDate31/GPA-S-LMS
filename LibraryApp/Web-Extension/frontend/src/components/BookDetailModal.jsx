@@ -72,7 +72,7 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
     try {
       await axios.post('/api/request', {
         type: 'book_request',
-        details: `Request for book: ${book.title} (ID: ${book.book_id})`
+        details: JSON.stringify({ book_id: book.book_id, title: book.title, accession_no: book.accession_no || null })
       });
       setRequestStatus('success');
       addToast('Book requested successfully!', 'success');
