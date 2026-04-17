@@ -18,17 +18,17 @@ const BookLoanCard = ({
   const statusConfig = {
     normal: {
       label: 'On Time',
-      chipClass: 'bg-slate-100 text-slate-700 border-slate-200',
+      chipClass: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800',
       icon: BookOpen
     },
     due_soon: {
       label: 'Due Soon',
-      chipClass: 'bg-amber-50 text-amber-700 border-amber-200',
+      chipClass: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800',
       icon: Calendar
     },
     overdue: {
       label: 'Overdue',
-      chipClass: 'bg-red-50 text-red-700 border-red-200',
+      chipClass: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800',
       icon: AlertCircle
     }
   };
@@ -63,7 +63,7 @@ const BookLoanCard = ({
         
         <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/50 p-2 rounded-lg border border-slate-100 dark:border-slate-700 transition-colors">
            <Calendar size={14} className="text-slate-400 dark:text-slate-500" />
-           <span className="font-medium">Due: {dueDate}</span>
+           <span className="font-medium">{dueDate}</span>
         </div>
       </div>
 

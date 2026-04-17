@@ -161,11 +161,11 @@ export default function Layout({ user, setUser }) {
         to={to} 
         title={!isExpanded ? label : ''}
         className={`
-          flex items-center gap-3 py-3 rounded-lg transition-colors duration-200 group relative
+          flex items-center gap-3 py-3 rounded-md transition-colors duration-200 group relative
           ${!isExpanded ? 'justify-center px-2' : 'px-4'}
           ${isActive 
-            ? 'bg-brand-blue/10 text-brand-blue font-bold' 
-            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'}
+            ? 'bg-brand-blue/10 text-brand-blue font-bold shadow-[inset_3px_0_0_0_#2563EB]' 
+            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900 shadow-[inset_3px_0_0_0_transparent]'}
         `}
       >
         <Icon size={22} className={`shrink-0 transition-colors ${isActive ? 'text-brand-blue' : 'text-slate-400 group-hover:text-slate-600'}`} strokeWidth={isActive ? 2.5 : 2} />
@@ -237,8 +237,8 @@ export default function Layout({ user, setUser }) {
              <button 
                onClick={togglePin} 
                className={`transition-colors p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 ${isPinned ? 'text-brand-blue bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'}`}
-               title={isPinned ? "Unpin Sidebar" : "Pin Sidebar"}
              >
+               <span className="sr-only">{isPinned ? "Unpin Sidebar" : "Pin Sidebar"}</span>
                {isPinned ? <Pin size={18} className="fill-current" /> : <PinOff size={18} />}
              </button>
            </div>

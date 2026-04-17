@@ -5,9 +5,9 @@ import axios from 'axios';
 
 export default function AlertBanner() {
   const [alert, setAlert] = useState(null);
-  const [visible, setVisible] = useState(true);
-  const location = useLocation();
-  const isDashboard = location.pathname === '/';
+  const [visible, setVisible] = useState(() => {
+    return sessionStorage.getItem('hideSecurityBanner') !== 'true';
+  });
 
   useEffect(() => {
     const checkAlerts = async () => {
@@ -26,8 +26,13 @@ export default function AlertBanner() {
     // Optional: Poll every 5 minutes if needed, but on-mount is sufficient for MVP
   }, []);
 
-  // Hide on Dashboard (avoid double alert) or if dismissed
-  if (!alert || !visible || isDashboard) return null;
+  // Hide if dismissed
+  if (!alert || !visible) return null;
+
+  const handleDismiss = () => {
+    setVisible(false);
+    sessionStorage.setItem('hideSecurityBanner', 'true');
+  };
 
   return (
     <div className={`text-white px-4 py-3 shadow-md relative z-50 animate-slide-in ${alert.type === 'security' ? 'bg-amber-500' : 'bg-red-600'}`}>
@@ -39,10 +44,10 @@ export default function AlertBanner() {
           </div>
           <div className="font-medium text-sm md:text-base">
             <span className="font-bold hidden sm:inline">
-              {alert.type === 'security' ? 'Action Recommended: ' : 'Attention Needed: '}
+              {alert.type === 'security' ? 'Account Setup: ' : 'Attention Needed: '}
             </span>
             {alert.type === 'security' ? (
-                <span>Set your personal password to secure your account.</span>
+                <span>Complete your account setup to secure your account.</span>
             ) : (
                 <>
                     <span className="sm:hidden font-bold">{alert.count} Overdue Book{alert.count > 1 ? 's' : ''}</span>
@@ -55,13 +60,13 @@ export default function AlertBanner() {
 
         <div className="flex items-center gap-4 shrink-0">
           <Link 
-            to="/" 
+            to="/settings" 
             className="text-white text-sm font-semibold hover:underline flex items-center gap-1 group bg-white/10 px-3 py-1.5 rounded-lg hover:bg-white/20 transition"
           >
-            Details <ChevronRight size={16} className="group-hover:translate-x-0.5 transition-transform" />
+            Fix Now <ChevronRight size={16} className="group-hover:translate-x-0.5 transition-transform" />
           </Link>
           <button 
-            onClick={() => setVisible(false)} 
+            onClick={handleDismiss} 
             className={`text-white/70 hover:text-white p-1 rounded-md transition ${alert.type === 'security' ? 'hover:bg-amber-600' : 'hover:bg-red-700'}`}
           >
             <X size={18} />
