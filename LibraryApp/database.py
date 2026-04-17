@@ -413,8 +413,28 @@ class Database:
                 UNIQUE(table_name, pk_value)
             )
         ''')
+
+        # Admin activity log — tracks all admin actions locally and syncs to cloud
+        self.create_table_safe(cursor, 'admin_activity', '''
+            CREATE TABLE IF NOT EXISTS admin_activity (
+                id SERIAL PRIMARY KEY,
+                action TEXT NOT NULL,
+                description TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''', sqlite_sql='''
+            CREATE TABLE IF NOT EXISTS admin_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                description TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
+
         
         # Migration: Add fine column if it doesn't exist
         # Migration: Add fine column if it doesn't exist (SQLite specific logic usually, but let's check basic columns)
