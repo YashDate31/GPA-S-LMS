@@ -42,6 +42,8 @@ class SyncManager:
         self.last_error = None
         self.backoff_base_seconds = 30
         self.backoff_max_seconds = 15 * 60
+        # Schema cache: avoid repeated information_schema queries on every sync cycle
+        self._schema_cache = set()  # tables already ensured this session
 
     def _compute_backoff_seconds(self):
         """Exponential backoff capped at backoff_max_seconds."""
@@ -107,9 +109,11 @@ class SyncManager:
     def _ensure_remote_table_columns(self, local_conn, remote_conn, table_name):
         """Add missing remote columns so cloud sync can accept the local schema.
 
-        This keeps Supabase aligned with SQLite when additive migrations are made
-        locally (for example, the `updated_at` column used by delta sync).
+        Cached per SyncManager lifetime: only runs the expensive information_schema
+        queries once per table, not on every sync cycle.
         """
+        if table_name in self._schema_cache:
+            return  # Already checked this session — skip the expensive query
         try:
             remote_cursor = remote_conn.cursor()
 
@@ -178,6 +182,7 @@ class SyncManager:
 
             if added_any:
                 remote_conn.commit()
+            self._schema_cache.add(table_name)  # Cache: skip this table next sync cycle
         except Exception as e:
             print(f"[Schema Sync] Failed for {table_name}: {e}")
     
@@ -492,7 +497,16 @@ class SyncManager:
         return applied
     
     def _sync_table_local_to_remote(self, local_conn, remote_conn, table_name):
-        """Sync a table from local to remote"""
+        """Sync a table from local SQLite to remote Postgres using natural business keys.
+
+        Bug fixes applied:
+        - Bug 3: Never sends the auto-increment 'id' in the payload — avoids serial id mismatch
+          that caused ON CONFLICT (id) to never fire and create duplicates each cycle.
+        - Bug 2: Sync manager is the ONLY writer to Supabase for data tables (_push_to_cloud
+          removed from borrow/return/book writes in database.py).
+        - Uses natural business key from _NATURAL_KEY_MAP for ON CONFLICT resolution.
+        - For tables with no natural key (admin_activity, notices): INSERT ... DO NOTHING.
+        """
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
@@ -511,8 +525,8 @@ class SyncManager:
                     )
                 """)
                 remote_conn.commit()
-            
-            # Get records modified since last sync
+
+            # Delta sync: only changed records since last sync
             has_updated_at = False
             try:
                 local_cursor.execute(f"PRAGMA table_info({table_name})")
@@ -521,60 +535,99 @@ class SyncManager:
                 has_updated_at = False
 
             if cutoff and has_updated_at:
-                local_cursor.execute(f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > ?", (cutoff,))
+                local_cursor.execute(
+                    f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > ?",
+                    (cutoff,)
+                )
             else:
                 local_cursor.execute(f"SELECT * FROM {table_name}")
             rows = local_cursor.fetchall()
-            
+
             if not rows:
                 return 0
-            
-            # Get column names
-            columns = [desc[0] for desc in local_cursor.description]
-            primary_key = self._get_primary_key(table_name)
-            pk_idx = columns.index(primary_key) if primary_key in columns else 0
-            
+
+            # All column names from local
+            all_columns = [desc[0] for desc in local_cursor.description]
+
+            # FIX Bug 3: Never send the local auto-increment 'id' to Supabase.
+            # Local SQLite id sequence is completely independent from Supabase SERIAL.
+            # Including it causes ON CONFLICT (id) to miss (ids differ) → duplicate insert.
+            SKIP_COLS = {'id'}
+            payload_columns = [c for c in all_columns if c.lower() not in SKIP_COLS]
+
+            # Natural key for this table (drives ON CONFLICT target)
+            natural_key = self._NATURAL_KEY_MAP.get(table_name)
+
             synced_count = 0
             for row in rows:
                 try:
-                    # Skip rows with null primary key
-                    if row[pk_idx] is None:
-                        continue
-                    
-                    # Try to insert or update
-                    placeholders = ', '.join(['%s'] * len(row))
-                    cols = ', '.join(columns)
-                    
-                    # Use UPSERT (INSERT ... ON CONFLICT)
-                    update_cols = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col != primary_key])
-                    
-                    query = f"""
-                        INSERT INTO {table_name} ({cols})
-                        VALUES ({placeholders})
-                        ON CONFLICT ({primary_key}) 
-                        DO UPDATE SET {update_cols}
-                    """
-                    
-                    remote_cursor.execute(query, row)
+                    row_dict = dict(zip(all_columns, row))
+
+                    # Skip rows where any natural key field is NULL
+                    if natural_key:
+                        if any(row_dict.get(k) is None for k in natural_key):
+                            continue
+
+                    payload_vals = [row_dict[c] for c in payload_columns]
+                    placeholders = ', '.join(['%s'] * len(payload_columns))
+                    cols_str = ', '.join(payload_columns)
+
+                    if natural_key:
+                        conflict_target = ', '.join(natural_key)
+                        update_cols = ', '.join(
+                            [f"{col} = EXCLUDED.{col}"
+                             for col in payload_columns
+                             if col not in natural_key]
+                        )
+                        if update_cols:
+                            query = f"""
+                                INSERT INTO {table_name} ({cols_str})
+                                VALUES ({placeholders})
+                                ON CONFLICT ({conflict_target})
+                                DO UPDATE SET {update_cols}
+                            """
+                        else:
+                            query = f"""
+                                INSERT INTO {table_name} ({cols_str})
+                                VALUES ({placeholders})
+                                ON CONFLICT ({conflict_target}) DO NOTHING
+                            """
+                    else:
+                        # Log/audit table: no natural key → insert only, skip exact duplicates
+                        query = f"""
+                            INSERT INTO {table_name} ({cols_str})
+                            VALUES ({placeholders})
+                            ON CONFLICT DO NOTHING
+                        """
+
+                    remote_cursor.execute(query, payload_vals)
                     synced_count += 1
-                    
+
                 except Exception as e:
-                    # Rollback the failed transaction to continue with next rows
                     try:
                         remote_conn.rollback()
-                    except:
+                    except Exception:
                         pass
-                    print(f"Error syncing row in {table_name}: {e}")
-            
+                    print(f"Error syncing row in {table_name} (local→remote): {e}")
+
             remote_conn.commit()
             return synced_count
-            
+
         except Exception as e:
             print(f"Error syncing table {table_name} local to remote: {e}")
             return 0
     
     def _sync_table_remote_to_local(self, local_conn, remote_conn, table_name):
-        """Sync a table from remote to local"""
+        """Sync a table from remote Postgres to local SQLite using natural business keys.
+
+        Bug fixes applied:
+        - Bug 4: Replaces destructive INSERT OR REPLACE with INSERT OR IGNORE + explicit UPDATE.
+          INSERT OR REPLACE deletes the row first if ANY unique constraint conflicts, which
+          silently destroys unrelated rows that share a local id with an incoming remote row.
+        - Bug 3: Never writes the remote 'id' to SQLite — Supabase SERIAL ids are independent
+          from SQLite AUTOINCREMENT ids; writing them would destroy local rows via id collision.
+        - Uses natural business key for existence check + selective UPDATE.
+        """
         try:
             local_cursor = local_conn.cursor()
             remote_cursor = remote_conn.cursor()
@@ -590,8 +643,8 @@ class SyncManager:
                     )
                 """)
                 local_conn.commit()
-            
-            # Get records from remote
+
+            # Delta sync from remote
             try:
                 remote_cursor.execute("""
                     SELECT column_name FROM information_schema.columns
@@ -602,52 +655,122 @@ class SyncManager:
                 has_updated_at = False
 
             if cutoff and has_updated_at:
-                remote_cursor.execute(f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > %s", (cutoff,))
+                remote_cursor.execute(
+                    f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > %s",
+                    (cutoff,)
+                )
             else:
                 remote_cursor.execute(f"SELECT * FROM {table_name}")
             rows = remote_cursor.fetchall()
-            
+
             if not rows:
                 return 0
-            
-            # Get column names
-            columns = [desc[0] for desc in remote_cursor.description]
-            
+
+            # All column names from remote result
+            all_remote_columns = [desc[0] for desc in remote_cursor.description]
+
+            # FIX Bug 4 + Bug 3: Never write the remote 'id' into local SQLite.
+            # Supabase SERIAL and SQLite AUTOINCREMENT sequences are completely independent.
+            # Writing the remote id causes INSERT OR REPLACE to delete a different local row
+            # that happened to have that id, silently destroying data.
+            SKIP_COLS = {'id'}
+            # Only include columns that actually exist locally (handles schema drift)
+            local_cursor.execute(f"PRAGMA table_info({table_name})")
+            local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
+            payload_columns = [
+                c for c in all_remote_columns
+                if c.lower() not in SKIP_COLS and c.lower() in local_col_names
+            ]
+
+            if not payload_columns:
+                return 0
+
+            natural_key = self._NATURAL_KEY_MAP.get(table_name)
+
             synced_count = 0
             for row in rows:
                 try:
-                    # Try to insert or replace
-                    placeholders = ', '.join(['?'] * len(row))
-                    cols = ', '.join(columns)
-                    
-                    query = f"INSERT OR REPLACE INTO {table_name} ({cols}) VALUES ({placeholders})"
-                    local_cursor.execute(query, row)
-                    synced_count += 1
-                    
+                    row_dict = dict(zip(all_remote_columns, row))
+                    payload_vals = [row_dict.get(c) for c in payload_columns]
+
+                    if natural_key:
+                        key_vals = [row_dict.get(k) for k in natural_key]
+                        # Skip rows with NULL in any natural key field
+                        if any(v is None for v in key_vals):
+                            continue
+
+                        where_clause = ' AND '.join([f"{k} = ?" for k in natural_key])
+
+                        # Check if this record already exists locally
+                        local_cursor.execute(
+                            f"SELECT 1 FROM {table_name} WHERE {where_clause} LIMIT 1",
+                            key_vals
+                        )
+                        exists = local_cursor.fetchone()
+
+                        if exists:
+                            # Update non-key columns only
+                            update_cols = [c for c in payload_columns if c not in natural_key]
+                            if update_cols:
+                                set_clause = ', '.join([f"{c} = ?" for c in update_cols])
+                                update_vals = [row_dict.get(c) for c in update_cols] + key_vals
+                                local_cursor.execute(
+                                    f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}",
+                                    update_vals
+                                )
+                        else:
+                            # New record: insert without id (SQLite will auto-generate)
+                            placeholders = ', '.join(['?'] * len(payload_columns))
+                            cols_str = ', '.join(payload_columns)
+                            local_cursor.execute(
+                                f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})",
+                                payload_vals
+                            )
+                        synced_count += 1
+
+                    else:
+                        # No natural key (log/audit tables): insert only, never overwrite
+                        # INSERT OR IGNORE is safe here — won't delete anything
+                        placeholders = ', '.join(['?'] * len(payload_columns))
+                        cols_str = ', '.join(payload_columns)
+                        local_cursor.execute(
+                            f"INSERT OR IGNORE INTO {table_name} ({cols_str}) VALUES ({placeholders})",
+                            payload_vals
+                        )
+                        synced_count += 1
+
                 except Exception as e:
-                    print(f"Error syncing row in {table_name}: {e}")
-            
+                    print(f"Error syncing row from remote in {table_name}: {e}")
+
             local_conn.commit()
             return synced_count
-            
+
         except Exception as e:
             print(f"Error syncing table {table_name} remote to local: {e}")
             return 0
     
+    # Natural business-key map — used by both local→remote and remote→local sync.
+    # These are content-based unique keys, NEVER the auto-increment serial 'id'.
+    # None = no natural key (log/audit tables) → INSERT ... DO NOTHING / INSERT OR IGNORE
+    _NATURAL_KEY_MAP = {
+        'students':          ('enrollment_no',),
+        'books':             ('book_id',),
+        'borrow_records':    ('enrollment_no', 'book_id', 'borrow_date'),
+        'admin_activity':    None,
+        'academic_years':    ('year_name',),
+        'promotion_history': ('enrollment_no', 'old_year', 'new_year', 'promotion_date'),
+        'system_settings':   ('key',),
+        'requests':          None,
+        'notices':           None,
+        'student_auth':      ('enrollment_no',),
+        'deletion_requests': ('student_id', 'timestamp'),
+    }
+
     def _get_primary_key(self, table_name):
-        """Get primary key column name for table"""
-        pk_map = {
-            'students': 'enrollment_no',
-            'books': 'book_id',
-            'borrow_records': 'id',
-            'admin_activity': 'id',
-            'requests': 'req_id',
-            'notices': 'id',
-            'academic_years': 'id',
-            'promotion_history': 'id',
-            'system_settings': 'key'
-        }
-        return pk_map.get(table_name, 'id')
+        """Legacy helper — returns first natural key column or 'id' as fallback.
+        Prefer _NATURAL_KEY_MAP for new sync logic."""
+        nk = self._NATURAL_KEY_MAP.get(table_name)
+        return nk[0] if nk else 'id'
     
     def _sync_portal_table_remote_to_local(self, local_conn, remote_conn, table_name):
         """Sync portal tables (requests, notices) from remote Postgres to local SQLite.
