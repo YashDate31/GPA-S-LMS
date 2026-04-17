@@ -249,6 +249,17 @@ class SyncManager:
                 tables_to_sync = default_tables_to_sync
                 portal_tables_pull = default_portal_tables_pull
                 portal_tables_push = default_portal_tables_push
+
+            # Sync deletions ONCE before any table upserts so deleted rows don't reappear.
+            try:
+                self._ensure_sync_deletions_tables(local_conn, remote_conn)
+                if direction in ['local_to_remote', 'both']:
+                    self._sync_deletions_local_to_remote(local_conn, remote_conn, allowed_tables=tables_to_sync)
+                if direction in ['remote_to_local', 'both']:
+                    self._sync_deletions_remote_to_local(local_conn, remote_conn, allowed_tables=tables_to_sync)
+            except Exception as e:
+                # Deletion sync should not hard-fail the entire sync cycle.
+                print(f"[Sync Deletions] Warning: {e}")
             
             for idx, table in enumerate(tables_to_sync):
                 if progress_callback:
@@ -349,6 +360,141 @@ class SyncManager:
                 self.is_syncing = False
         
         return results
+
+    def _ensure_sync_deletions_tables(self, local_conn, remote_conn):
+        """Ensure the sync_deletions tombstone table exists in both local and remote DBs."""
+        # Local (SQLite)
+        lc = local_conn.cursor()
+        lc.execute("""
+            CREATE TABLE IF NOT EXISTS sync_deletions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                pk_value TEXT NOT NULL,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT DEFAULT 'desktop',
+                synced_remote INTEGER DEFAULT 0,
+                UNIQUE(table_name, pk_value)
+            )
+        """)
+        local_conn.commit()
+
+        # Remote (Postgres)
+        rc = remote_conn.cursor()
+        rc.execute("""
+            CREATE TABLE IF NOT EXISTS sync_deletions (
+                id SERIAL PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                pk_value TEXT NOT NULL,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT DEFAULT 'desktop',
+                UNIQUE(table_name, pk_value)
+            )
+        """)
+        remote_conn.commit()
+
+    def _sync_deletions_local_to_remote(self, local_conn, remote_conn, allowed_tables=None):
+        """Push local tombstones to remote and delete the corresponding remote rows."""
+        allowed = set(allowed_tables) if allowed_tables else None
+        lc = local_conn.cursor()
+        rc = remote_conn.cursor()
+
+        # Only push unsynced tombstones
+        if allowed:
+            placeholders = ','.join(['?'] * len(allowed))
+            lc.execute(
+                f"SELECT table_name, pk_value, deleted_at, source FROM sync_deletions WHERE synced_remote=0 AND table_name IN ({placeholders})",
+                tuple(allowed)
+            )
+        else:
+            lc.execute("SELECT table_name, pk_value, deleted_at, source FROM sync_deletions WHERE synced_remote=0")
+        rows = lc.fetchall() or []
+        if not rows:
+            return 0
+
+        pushed = 0
+        for row in rows:
+            table_name = str(row[0])
+            pk_value = str(row[1])
+            deleted_at = row[2]
+            source = str(row[3] or 'desktop')
+            if allowed and table_name not in allowed:
+                continue
+
+            # 1) Upsert tombstone to remote
+            rc.execute(
+                """
+                INSERT INTO sync_deletions (table_name, pk_value, deleted_at, source)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (table_name, pk_value)
+                DO UPDATE SET deleted_at = EXCLUDED.deleted_at, source = EXCLUDED.source
+                """,
+                (table_name, pk_value, deleted_at, source)
+            )
+
+            # 2) Delete remote row from the actual table
+            pk_col = self._get_primary_key(table_name)
+            try:
+                rc.execute(f"DELETE FROM {table_name} WHERE {pk_col} = %s", (pk_value,))
+            except Exception as e:
+                # If table doesn't exist remotely or constraints block, keep tombstone anyway.
+                print(f"[Sync Deletions] Remote delete failed for {table_name}({pk_value}): {e}")
+
+            # 3) Mark local tombstone as synced
+            lc.execute(
+                "UPDATE sync_deletions SET synced_remote=1 WHERE table_name=? AND pk_value=?",
+                (table_name, pk_value)
+            )
+            pushed += 1
+
+        remote_conn.commit()
+        local_conn.commit()
+        return pushed
+
+    def _sync_deletions_remote_to_local(self, local_conn, remote_conn, allowed_tables=None):
+        """Pull remote tombstones and delete the corresponding local rows."""
+        allowed = set(allowed_tables) if allowed_tables else None
+        lc = local_conn.cursor()
+        rc = remote_conn.cursor()
+        cutoff = self._get_sync_cutoff()
+
+        # Pull only new tombstones when possible
+        if cutoff:
+            rc.execute("SELECT table_name, pk_value, deleted_at, source FROM sync_deletions WHERE deleted_at IS NULL OR deleted_at > %s", (cutoff,))
+        else:
+            rc.execute("SELECT table_name, pk_value, deleted_at, source FROM sync_deletions")
+        rows = rc.fetchall() or []
+        if not rows:
+            return 0
+
+        applied = 0
+        for row in rows:
+            table_name = str(row[0])
+            pk_value = str(row[1])
+            deleted_at = row[2]
+            source = str(row[3] or 'remote')
+            if allowed and table_name not in allowed:
+                continue
+
+            # Persist tombstone locally (synced_remote=1 because it exists in cloud)
+            try:
+                lc.execute(
+                    "INSERT OR REPLACE INTO sync_deletions (table_name, pk_value, deleted_at, source, synced_remote) VALUES (?, ?, ?, ?, 1)",
+                    (table_name, pk_value, deleted_at, source)
+                )
+            except Exception:
+                pass
+
+            # Delete local row
+            pk_col = self._get_primary_key(table_name)
+            try:
+                lc.execute(f"DELETE FROM {table_name} WHERE {pk_col} = ?", (pk_value,))
+            except Exception as e:
+                print(f"[Sync Deletions] Local delete failed for {table_name}({pk_value}): {e}")
+                continue
+            applied += 1
+
+        local_conn.commit()
+        return applied
     
     def _sync_table_local_to_remote(self, local_conn, remote_conn, table_name):
         """Sync a table from local SQLite to remote Postgres using natural business keys.
