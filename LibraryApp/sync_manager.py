@@ -536,7 +536,7 @@ class SyncManager:
 
             if cutoff and has_updated_at:
                 local_cursor.execute(
-                    f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > ?",
+                    f"SELECT * FROM {table_name} WHERE updated_at > ?",
                     (cutoff,)
                 )
             else:
@@ -569,6 +569,15 @@ class SyncManager:
                             continue
 
                     payload_vals = [row_dict[c] for c in payload_columns]
+
+                    # Fix 1: Backfill NULL updated_at before pushing to Supabase.
+                    # A row with NULL updated_at would be re-fetched on every remote→local
+                    # cycle because the old query used "updated_at IS NULL OR updated_at > ?".
+                    # Even with that clause removed, stamping here keeps cloud data clean.
+                    if 'updated_at' in payload_columns:
+                        idx = payload_columns.index('updated_at')
+                        if payload_vals[idx] is None:
+                            payload_vals[idx] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     placeholders = ', '.join(['%s'] * len(payload_columns))
                     cols_str = ', '.join(payload_columns)
 
@@ -656,7 +665,7 @@ class SyncManager:
 
             if cutoff and has_updated_at:
                 remote_cursor.execute(
-                    f"SELECT * FROM {table_name} WHERE updated_at IS NULL OR updated_at > %s",
+                    f"SELECT * FROM {table_name} WHERE updated_at > %s",
                     (cutoff,)
                 )
             else:
@@ -698,6 +707,10 @@ class SyncManager:
                         # Skip rows with NULL in any natural key field
                         if any(v is None for v in key_vals):
                             continue
+                        # Bug 2 fix: normalize book_id whitespace so "8264, 8266" matches "8264,8266"
+                        # Non-contiguous accession ranges may have spaces after commas depending on origin
+                        if table_name == 'books':
+                            key_vals = [str(v).replace(' ', '') if v is not None else v for v in key_vals]
 
                         where_clause = ' AND '.join([f"{k} = ?" for k in natural_key])
 
