@@ -567,6 +567,24 @@ class LibraryApp:
             s = str(v).strip()
             return '' if s.lower() == 'nan' else s
 
+        def _norm_id(v):
+            """Normalize numeric-looking IDs like 24210270282.0 -> 24210270282."""
+            s = _s(v)
+            if not s:
+                return ''
+            s = s.replace('\u00A0', ' ').strip()
+            if re.fullmatch(r'\d+\.0+', s):
+                return s.split('.')[0]
+            if 'e' in s.lower():
+                try:
+                    from decimal import Decimal
+                    d = Decimal(s)
+                    if d == d.to_integral_value():
+                        return format(d.quantize(1), 'f').split('.')[0]
+                except Exception:
+                    pass
+            return s
+
         def _to_date(v):
             s = _s(v)
             if not s:
@@ -673,14 +691,14 @@ class LibraryApp:
             for idx, row in df.iterrows():
                 row_no = idx + 2
                 try:
-                    enr = _s(row.get('enrollment_no', ''))
+                    enr = _norm_id(row.get('enrollment_no', ''))
                     if not enr:
                         summary['skipped'] += 1
                         continue
                     student_name = _s(row.get('student_name', ''))
                     branch = _s(row.get('branch', ''))
 
-                    acc = _s(row.get('book_id', ''))
+                    acc = _norm_id(row.get('book_id', ''))
                     if not acc:
                         summary['skipped'] += 1
                         continue
@@ -803,10 +821,34 @@ class LibraryApp:
             s = str(v).strip()
             return '' if s.lower() == 'nan' else s
 
+        def _norm_numeric_text(v):
+            """Normalize numeric-looking Excel values like 24210270282.0 -> 24210270282.
+            Keeps text as-is otherwise.
+            """
+            s = _s(v)
+            if not s:
+                return ''
+            s = s.replace('\u00A0', ' ').strip()
+            # Common pandas float-to-string artifact
+            if re.fullmatch(r'\d+\.0+', s):
+                return s.split('.')[0]
+            # Scientific notation: 2.4210270282E+10
+            if 'e' in s.lower():
+                try:
+                    from decimal import Decimal
+                    d = Decimal(s)
+                    if d == d.to_integral_value():
+                        # Format as plain integer string
+                        return format(d.quantize(1), 'f').split('.')[0]
+                except Exception:
+                    pass
+            return s
+
         summary = {'added': 0, 'skipped': 0, 'duplicate': 0, 'errors': 0, 'error_list': []}
         try:
             # Read once normally; if it's a report-export (headers not in row 0), we'll re-read with detected header row.
-            df = pd.read_excel(file_path)
+            # IMPORTANT: dtype=str prevents Enrollment No becoming float and showing '.0'
+            df = pd.read_excel(file_path, dtype=str)
             if df.empty:
                 return Exception("The Excel file is empty.")
 
@@ -875,7 +917,7 @@ class LibraryApp:
             if missing_now:
                 hdr = _find_header_row_in_report(file_path)
                 if hdr is not None:
-                    df = pd.read_excel(file_path, header=hdr)
+                    df = pd.read_excel(file_path, header=hdr, dtype=str)
                     if df.empty:
                         return Exception("The Excel file has no data rows.")
                     df.columns = [c.strip().lower().replace(' ', '_') for c in df.columns.astype(str)]
@@ -926,10 +968,10 @@ class LibraryApp:
             for idx, row in df.iterrows():
                 row_no = idx + 2
                 try:
-                    enrollment = _s(row.get('enrollment_no', ''))
+                    enrollment = _norm_numeric_text(row.get('enrollment_no', ''))
                     name       = _s(row.get('name', ''))
                     email      = _s(row.get('email', ''))
-                    phone      = _s(row.get('phone', ''))
+                    phone      = _norm_numeric_text(row.get('phone', ''))
                     dept_raw   = _s(row.get('department', ''))
                     department = dept_raw if dept_raw else default_branch
                     year_raw   = _s(row.get('year', ''))
