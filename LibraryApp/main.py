@@ -509,10 +509,294 @@ class LibraryApp:
             import traceback
             messagebox.showerror("Import Error", f"Could not open import dialog:\n{e}\n\n{traceback.format_exc()[-300:]}")
 
+    def import_transactions_excel_report(self):
+        """Import Transactions/Borrow Records from a report-style Excel (e.g., exported Records report)."""
+        if 'pd' not in globals() and not PANDAS_AVAILABLE:
+            messagebox.showerror("Missing Dependency", "Pandas is required for Excel import (pandas + openpyxl).")
+            return
+
+        try:
+            self.root.lift()
+            self.root.focus_force()
+            self.root.update()
+            file_path = filedialog.askopenfilename(
+                parent=self.root,
+                title="Select Transactions/Records Excel file",
+                filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")]
+            )
+            self.root.update()
+            if not file_path:
+                return
+
+            # Progress dialog
+            self.import_progress_dialog = tk.Toplevel(self.root)
+            self.import_progress_dialog.title("Importing Transactions")
+            self.import_progress_dialog.geometry("360x170")
+            self.import_progress_dialog.resizable(False, False)
+            self.import_progress_dialog.transient(self.root)
+            self.import_progress_dialog.grab_set()
+            px = (self.root.winfo_screenwidth() // 2) - 180
+            py = (self.root.winfo_screenheight() // 2) - 85
+            self.import_progress_dialog.geometry(f"+{px}+{py}")
+            tk.Label(
+                self.import_progress_dialog,
+                text=f"Importing transactions from:\n{os.path.basename(file_path)}\n\nPlease wait...",
+                font=('Segoe UI', 10), pady=15
+            ).pack()
+            pb = ttk.Progressbar(self.import_progress_dialog, mode='indeterminate')
+            pb.pack(fill=tk.X, padx=20, pady=10)
+            pb.start(10)
+            self.import_progress_dialog.update()
+
+            self.run_in_background_thread(
+                self._import_transactions_worker,
+                self._on_transactions_import_complete,
+                file_path=file_path
+            )
+        except Exception as e:
+            import traceback
+            messagebox.showerror("Import Error", f"Could not start transactions import:\n{e}\n\n{traceback.format_exc()[-300:]}")
+
+    def _import_transactions_worker(self, file_path):
+        """Worker: import borrow_records from a report-style Excel export."""
+        import pandas as pd
+        import re
+        from datetime import datetime
+
+        def _s(v):
+            s = str(v).strip()
+            return '' if s.lower() == 'nan' else s
+
+        def _to_date(v):
+            s = _s(v)
+            if not s:
+                return None
+            if s.lower().startswith('not'):
+                return None
+            try:
+                dt = pd.to_datetime(s, errors='coerce')
+                if pd.isna(dt):
+                    return None
+                return dt.strftime('%Y-%m-%d')
+            except Exception:
+                return None
+
+        def _parse_fine(v):
+            s = _s(v)
+            if not s:
+                return 0
+            m = re.search(r'(\d+)', s.replace(',', ''))
+            return int(m.group(1)) if m else 0
+
+        def _find_header_row(path, keywords=('enrollment', 'book id', 'issue date')):
+            raw = pd.read_excel(path, header=None, dtype=str)
+            kw = [k.lower() for k in keywords]
+            for i in range(min(len(raw), 250)):
+                row = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
+                score = sum(any(k in cell for k in kw) for cell in row)
+                if score >= 2:
+                    return i
+            return 0
+
+        summary = {'added': 0, 'skipped': 0, 'duplicates': 0, 'errors': 0, 'error_list': []}
+        try:
+            hdr = _find_header_row(file_path)
+            df = pd.read_excel(file_path, header=hdr, dtype=str)
+            if df is None or df.empty:
+                return Exception("The Excel file has no transactions rows.")
+
+            # Normalize columns
+            df.columns = (
+                df.columns.astype(str)
+                .str.strip().str.lower()
+                .str.replace(r'[^a-z0-9]+', '_', regex=True)
+                .str.strip('_')
+            )
+
+            col_aliases = {
+                'enrollment': 'enrollment_no',
+                'enrollment_no': 'enrollment_no',
+                'enrollment_number': 'enrollment_no',
+                'student_name': 'student_name',
+                'name': 'student_name',
+                'branch': 'branch',
+                'department': 'branch',
+                'book_id': 'book_id',
+                'bookid': 'book_id',
+                'book_title': 'book_title',
+                'title': 'book_title',
+                'issue_date': 'borrow_date',
+                'borrow_date': 'borrow_date',
+                'due_date': 'due_date',
+                'return_date': 'return_date',
+                'status': 'status',
+                'fine': 'fine',
+            }
+            df.rename(columns={k: v for k, v in col_aliases.items() if k in df.columns}, inplace=True)
+
+            required = ['enrollment_no', 'book_id', 'borrow_date', 'due_date', 'status']
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                return Exception(f"Missing required columns: {', '.join(missing)}\nFound: {', '.join(df.columns.tolist())}")
+
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute('BEGIN')
+            except Exception:
+                pass
+
+            # Cache existing keys to detect duplicates
+            cur.execute("SELECT enrollment_no, accession_no, borrow_date FROM borrow_records")
+            existing_keys = set()
+            for r in cur.fetchall() or []:
+                existing_keys.add((str(r[0] or ''), str(r[1] or ''), str(r[2] or '')))
+
+            # Cache existing students/books
+            cur.execute("SELECT enrollment_no FROM students")
+            existing_students = {str(r[0]) for r in cur.fetchall() or []}
+            cur.execute("SELECT book_id, barcode FROM books")
+            existing_books = {}
+            barcode_index = {}
+            for bid, bc in cur.fetchall() or []:
+                bid_s = str(bid)
+                existing_books[bid_s] = True
+                for t in [x.strip() for x in str(bc or '').split(',') if x.strip()]:
+                    barcode_index[t] = bid_s
+
+            # Academic year (optional)
+            try:
+                academic_year = self.db.get_active_academic_year()
+            except Exception:
+                academic_year = None
+
+            for idx, row in df.iterrows():
+                row_no = idx + 2
+                try:
+                    enr = _s(row.get('enrollment_no', ''))
+                    if not enr:
+                        summary['skipped'] += 1
+                        continue
+                    student_name = _s(row.get('student_name', ''))
+                    branch = _s(row.get('branch', ''))
+
+                    acc = _s(row.get('book_id', ''))
+                    if not acc:
+                        summary['skipped'] += 1
+                        continue
+                    book_title = _s(row.get('book_title', ''))
+
+                    borrow_date = _to_date(row.get('borrow_date', ''))
+                    due_date = _to_date(row.get('due_date', ''))
+                    return_date = _to_date(row.get('return_date', ''))
+                    status_raw = _s(row.get('status', '')).lower()
+                    fine = _parse_fine(row.get('fine', ''))
+
+                    status = 'borrowed' if 'borrow' in status_raw or 'issue' in status_raw or 'active' in status_raw else 'returned'
+                    if status == 'borrowed':
+                        return_date = None
+
+                    key = (enr, acc, borrow_date or '')
+                    if key in existing_keys:
+                        summary['duplicates'] += 1
+                        continue
+
+                    # Ensure student exists (create minimal if missing)
+                    if enr not in existing_students:
+                        # Year is unknown from this report; store empty/placeholder
+                        cur.execute(
+                            "INSERT OR IGNORE INTO students (enrollment_no, name, email, phone, department, year, updated_at) VALUES (?, ?, '', '', ?, '', CURRENT_TIMESTAMP)",
+                            (enr, student_name or enr, branch or 'Computer Engineering')
+                        )
+                        existing_students.add(enr)
+
+                    # Resolve or create book
+                    real_book_id = None
+                    if acc in existing_books:
+                        real_book_id = acc
+                    elif acc in barcode_index:
+                        real_book_id = barcode_index[acc]
+
+                    if not real_book_id:
+                        # Create placeholder book with this accession id
+                        real_book_id = acc
+                        total = 1
+                        avail = 0 if status == 'borrowed' else 1
+                        cur.execute(
+                            "INSERT OR IGNORE INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price, updated_at) "
+                            "VALUES (?, ?, '', '', 'Technology', ?, ?, ?, 0, CURRENT_TIMESTAMP)",
+                            (real_book_id, book_title or f"Book {acc}", total, avail, acc)
+                        )
+                        existing_books[real_book_id] = True
+                        barcode_index[acc] = real_book_id
+
+                    # Insert borrow record
+                    cur.execute(
+                        "INSERT INTO borrow_records (enrollment_no, book_id, accession_no, borrow_date, due_date, return_date, status, fine, academic_year, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                        (enr, real_book_id, acc, borrow_date, due_date, return_date, status, fine, academic_year)
+                    )
+                    existing_keys.add(key)
+                    summary['added'] += 1
+                except Exception as e:
+                    summary['errors'] += 1
+                    summary['error_list'].append(f"Row {row_no}: {e}")
+
+            conn.commit()
+
+            # Recalculate available_copies to match current borrowed records
+            try:
+                self.db.verify_data_integrity()
+            except Exception:
+                pass
+
+            return summary
+        except Exception as e:
+            return e
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _on_transactions_import_complete(self, result):
+        """Callback for transactions import completion."""
+        try:
+            if hasattr(self, 'import_progress_dialog') and self.import_progress_dialog:
+                self.import_progress_dialog.destroy()
+        except Exception:
+            pass
+        self.import_progress_dialog = None
+
+        if isinstance(result, Exception):
+            messagebox.showerror("Import Error", f"Failed to import transactions:\n{result}")
+            return
+
+        if not isinstance(result, dict):
+            messagebox.showerror("Import Error", f"Unexpected result: {result}")
+            return
+
+        msg = (
+            f"✅ Transactions import completed!\n\n"
+            f"Added      : {result.get('added', 0)}\n"
+            f"Duplicates : {result.get('duplicates', 0)}\n"
+            f"Skipped    : {result.get('skipped', 0)}\n"
+            f"Errors     : {result.get('errors', 0)}"
+        )
+        if result.get('error_list'):
+            msg += "\n\nFirst errors:\n" + "\n".join(result['error_list'][:5])
+
+        messagebox.showinfo("Import Results", msg)
+        try:
+            self.refresh_all_data()
+        except Exception:
+            pass
+
     def _import_students_worker(self, file_path, default_year, default_branch="Computer Engineering"):
         """Worker function for importing students from Excel"""
         import pandas as pd
         import math
+        import re
 
         def _s(v):
             """Safe string: strip, return '' for nan/None."""
@@ -521,6 +805,7 @@ class LibraryApp:
 
         summary = {'added': 0, 'skipped': 0, 'duplicate': 0, 'errors': 0, 'error_list': []}
         try:
+            # Read once normally; if it's a report-export (headers not in row 0), we'll re-read with detected header row.
             df = pd.read_excel(file_path)
             if df.empty:
                 return Exception("The Excel file is empty.")
@@ -570,6 +855,32 @@ class LibraryApp:
             }
             df.rename(columns={k: v for k, v in aliases.items() if k in df.columns}, inplace=True)
 
+            # If required columns are missing, try to auto-detect header row (common in exported reports)
+            def _find_header_row_in_report(path):
+                try:
+                    raw = pd.read_excel(path, header=None, dtype=str)
+                    if raw is None or len(raw) == 0:
+                        return None
+                    for i in range(min(len(raw), 200)):
+                        row = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
+                        has_enroll = any(('enrollment' in c and ('no' in c or 'number' in c)) or c in ('enrollment', 'enrollment_no') for c in row)
+                        has_name = any(('name' == c) or ('student_name' == c) or ('student name' in c) or (c == 'student') for c in row)
+                        if has_enroll and has_name:
+                            return i
+                except Exception:
+                    return None
+                return None
+
+            missing_now = [c for c in ('enrollment_no', 'name') if c not in df.columns]
+            if missing_now:
+                hdr = _find_header_row_in_report(file_path)
+                if hdr is not None:
+                    df = pd.read_excel(file_path, header=hdr)
+                    if df.empty:
+                        return Exception("The Excel file has no data rows.")
+                    df.columns = [c.strip().lower().replace(' ', '_') for c in df.columns.astype(str)]
+                    df.rename(columns={k: v for k, v in aliases.items() if k in df.columns}, inplace=True)
+
             # Auto-detect enrollment column: first column whose values look like enrollment numbers
             if 'enrollment_no' not in df.columns:
                 for col in df.columns:
@@ -598,6 +909,20 @@ class LibraryApp:
                     f"Please rename your columns to 'Enrollment No' and 'Name'."
                 )
 
+            # Normalize Year text from Excel/default
+            def _norm_year(y):
+                s = _s(y)
+                if not s:
+                    return ''
+                s2 = ' '.join(s.split()).strip().lower()
+                mapping = {
+                    '1st year': '1st', 'first year': '1st', 'fy': '1st', '1st': '1st',
+                    '2nd year': '2nd', 'second year': '2nd', 'sy': '2nd', '2nd': '2nd',
+                    '3rd year': '3rd', 'third year': '3rd', 'ty': '3rd', '3rd': '3rd',
+                    'pass out': 'Pass Out', 'passout': 'Pass Out', 'po': 'Pass Out'
+                }
+                return mapping.get(s2, s)
+
             for idx, row in df.iterrows():
                 row_no = idx + 2
                 try:
@@ -607,7 +932,8 @@ class LibraryApp:
                     phone      = _s(row.get('phone', ''))
                     dept_raw   = _s(row.get('department', ''))
                     department = dept_raw if dept_raw else default_branch
-                    year       = default_year
+                    year_raw   = _s(row.get('year', ''))
+                    year       = _norm_year(year_raw) if year_raw else _norm_year(default_year)
 
                     if not enrollment or not name:
                         summary['skipped'] += 1
@@ -2293,9 +2619,17 @@ Government Polytechnic Awasari (Kh)"""
 
     def clear_all_data_ui(self):
         """Clear all demo/user data with a confirmation prompt."""
-        if not messagebox.askyesno("Confirm", "Remove ALL students, books and records? This cannot be undone."):
+        if not messagebox.askyesno(
+            "Confirm",
+            "Remove ALL data from this software?\n\n"
+            "This will wipe:\n"
+            "• Local database (students, books, records, etc.)\n"
+            "• Supabase database (cloud)\n\n"
+            "This cannot be undone.",
+            icon='warning'
+        ):
             return
-        ok, msg = self.db.clear_all_data()
+        ok, msg = self.db.clear_all_data_everywhere(clear_supabase=True, clear_portal_db=True)
         if ok:
             messagebox.showinfo("Done", msg)
             self.refresh_all_data()
@@ -2322,7 +2656,10 @@ Government Polytechnic Awasari (Kh)"""
         # First confirmation
         if not messagebox.askyesno(
             "Confirm Data Wipe",
-            "This will permanently remove ALL students, books and transaction records.\n\nAre you absolutely sure?",
+            "This will permanently remove ALL data from:\n"
+            "• Local database\n"
+            "• Supabase database (cloud)\n\n"
+            "Are you absolutely sure?",
             icon='warning'
         ):
             return
@@ -2342,19 +2679,19 @@ Government Polytechnic Awasari (Kh)"""
         # Second, stronger confirmation
         if not messagebox.askyesno(
             "Final Confirmation",
-            "Last chance! This action cannot be undone. Proceed with complete wipe?",
+            "Last chance! This action cannot be undone.\n\nProceed with complete LOCAL + SUPABASE wipe?",
             icon='warning'
         ):
             return
         try:
-            success, msg = self.db.clear_all_data()
+            success, msg = self.db.clear_all_data_everywhere(clear_supabase=True, clear_portal_db=True)
             if success:
                 # Refresh UI tables
                 try:
                     self.refresh_all_data()
                 except Exception:
                     pass
-                messagebox.showinfo("Data Cleared", "All data removed successfully.")
+                messagebox.showinfo("Data Cleared", msg or "All data removed successfully.")
             else:
                 messagebox.showerror("Error", msg or "Failed to clear data.")
         except Exception as e:
@@ -5164,6 +5501,22 @@ Current Settings:
             pady=20
         )
         borrow_frame.pack(fill=tk.X, expand=True, pady=(0, 25))
+
+        # Quick actions (Import Transactions)
+        tx_actions = tk.Frame(borrow_frame, bg=self.colors['primary'])
+        tx_actions.pack(fill=tk.X, pady=(0, 10))
+        tk.Button(
+            tx_actions,
+            text="📥 Import Transactions (Excel)",
+            font=('Segoe UI', 10, 'bold'),
+            bg='#6f42c1',
+            fg='white',
+            relief='flat',
+            padx=12,
+            pady=6,
+            cursor='hand2',
+            command=self.import_transactions_excel_report
+        ).pack(side=tk.RIGHT)
         
         # Borrow form container
         borrow_form = tk.Frame(borrow_frame, bg=self.colors['primary'])
@@ -6837,14 +7190,14 @@ Current Settings:
         
         # Form fields
         fields = [
-            ("Book ID:", "book_id"),
+            ("Book ID (Range e.g. 1001-1010):", "book_id"),
             ("Title:", "title"),
             ("Author:", "author"),
             ("ISBN:", "isbn"),
             ("Category:", "category"),
             ("Total Copies:", "copies"),
             ("Price (₹):", "price"),
-            ("Barcode:", "barcode")
+            ("Barcode / Copy IDs (auto from Book ID range):", "barcode")
         ]
         
         entries = {}
@@ -6958,8 +7311,104 @@ Current Settings:
             except ValueError:
                 messagebox.showerror("Error", "Price must be a valid non-negative number!")
                 return
-            # Check Book ID uniqueness
-            book_id_val = entries['book_id'].get().strip()
+
+            # Book ID == Barcode (Copy IDs) in your library:
+            # Accept Book ID as a sequential range "1001-1010" and auto-calc copies.
+            import re
+
+            def _parse_range_or_csv(text):
+                """Return (list_of_accessions, canonical_range_str_or_none).
+                Accepts: '1001-1010' or '1001,1002,1003'."""
+                raw = (text or '').strip()
+                if not raw:
+                    return [], None
+                m = re.match(r'^\s*(\d+)\s*-\s*(\d+)\s*$', raw)
+                if m:
+                    start = int(m.group(1))
+                    end = int(m.group(2))
+                    if end < start:
+                        raise ValueError("Range must be sequential (start ≤ end).")
+                    return [str(n) for n in range(start, end + 1)], f"{start}-{end}"
+                # CSV of numbers
+                parts = [p.strip() for p in raw.split(',') if p.strip()]
+                out = []
+                for p in parts:
+                    try:
+                        out.append(str(int(float(p))))
+                    except Exception:
+                        # Non-numeric: don't treat as accession IDs
+                        return [], None
+                # Dedupe keep order
+                seen = set()
+                out = [x for x in out if not (x in seen or seen.add(x))]
+                return out, None
+
+            book_id_raw = entries['book_id'].get().strip()
+            barcode_raw = (entries.get('barcode').get() if entries.get('barcode') else '').strip()
+
+            accession_list = []
+            barcode_csv = barcode_raw
+            book_id_val = book_id_raw
+
+            try:
+                accession_list, canonical_range = _parse_range_or_csv(book_id_raw)
+            except ValueError as ve:
+                messagebox.showerror("Error", f"Invalid Book ID range: {ve}")
+                return
+
+            # If user entered a single numeric ID and set copies>1, auto-expand to a range.
+            if not accession_list:
+                try:
+                    if book_id_raw.isdigit() and copies > 1:
+                        start = int(book_id_raw)
+                        end = start + copies - 1
+                        accession_list = [str(n) for n in range(start, end + 1)]
+                        canonical_range = f"{start}-{end}"
+                except Exception:
+                    pass
+
+            # Backward compatibility: if Book ID isn't a range/CSV, allow Barcode field range/CSV.
+            if not accession_list and barcode_raw:
+                try:
+                    accession_list, _ = _parse_range_or_csv(barcode_raw)
+                except ValueError:
+                    accession_list = []
+
+            if accession_list:
+                # Canonical stored book_id should be a range string for multi-copy
+                if len(accession_list) >= 2:
+                    try:
+                        book_id_val = f"{int(accession_list[0])}-{int(accession_list[-1])}"
+                    except Exception:
+                        book_id_val = canonical_range or book_id_raw
+                else:
+                    book_id_val = accession_list[0]
+
+                barcode_csv = ','.join(accession_list)
+                if copies != len(accession_list):
+                    copies = len(accession_list)
+                    try:
+                        entries['copies'].delete(0, tk.END)
+                        entries['copies'].insert(0, str(copies))
+                    except Exception:
+                        pass
+
+                # If user typed a single numeric ID and copies>1, update the UI Book ID to the range.
+                try:
+                    if entries['book_id'].cget('state') != 'readonly':
+                        entries['book_id'].delete(0, tk.END)
+                        entries['book_id'].insert(0, book_id_val)
+                except Exception:
+                    pass
+
+                # Also auto-fill the Barcode entry with the range (short) for user visibility, but store CSV in DB.
+                try:
+                    if entries.get('barcode') and entries['barcode'].get().strip() == '':
+                        # show short range, not huge CSV
+                        entries['barcode'].insert(0, book_id_val)
+                except Exception:
+                    pass
+            # Check Book ID uniqueness (exact)
             if book_id_val:
                 conn = self.db.get_connection()
                 cur = conn.cursor()
@@ -6968,6 +7417,63 @@ Current Settings:
                 conn.close()
                 if exists:
                     messagebox.showerror("Error", f"Book ID '{book_id_val}' already exists! Please use a unique Book ID.")
+                    return
+
+            # Enforce: no Book ID (accession) duplicates/overlaps anywhere in the library
+            if accession_list:
+                conn = self.db.get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT book_id, barcode FROM books")
+                used_ids = set()
+                used_ranges = []  # list of (start,end)
+
+                for bid, bc in cur.fetchall() or []:
+                    bid_s = str(bid or '').strip()
+                    # From barcode CSV
+                    for t in [x.strip() for x in str(bc or '').split(',') if x.strip()]:
+                        try:
+                            used_ids.add(str(int(float(t))))
+                        except Exception:
+                            continue
+                    # From numeric book_id (older rows)
+                    if bid_s.isdigit():
+                        used_ids.add(bid_s)
+                    # From book_id ranges like "1001-1010"
+                    m = re.match(r'^(\d+)\s*-\s*(\d+)$', bid_s)
+                    if m:
+                        try:
+                            s0 = int(m.group(1)); e0 = int(m.group(2))
+                            if e0 >= s0:
+                                used_ranges.append((s0, e0))
+                        except Exception:
+                            pass
+
+                conn.close()
+
+                # Check overlaps with ranges efficiently
+                try:
+                    new_start = int(accession_list[0])
+                    new_end = int(accession_list[-1])
+                except Exception:
+                    new_start = None
+                    new_end = None
+
+                if new_start is not None and new_end is not None:
+                    for (s0, e0) in used_ranges:
+                        if not (new_end < s0 or new_start > e0):
+                            messagebox.showerror(
+                                "Error",
+                                f"Book ID range overlaps with an existing range ({s0}-{e0}).\n\n"
+                                f"Please choose a non-overlapping range."
+                            )
+                            return
+
+                collision = [a for a in accession_list if a in used_ids]
+                if collision:
+                    messagebox.showerror(
+                        "Error",
+                        "Some Book IDs are already used by existing books:\n" + ", ".join(collision[:25])
+                    )
                     return
             # Check for duplicate title
             title_val = entries['title'].get().strip()
@@ -6993,22 +7499,90 @@ Current Settings:
                 elif choice:  # YES - merge copies
                     conn = self.db.get_connection()
                     cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ? WHERE book_id = ?",
-                        (copies, copies, existing_id)
-                    )
+                    # Enforce global uniqueness of accession numbers when provided
+                    if accession_list:
+                        # Gather used accessions/ranges from ALL books
+                        cur.execute("SELECT book_id, barcode FROM books")
+                        used_elsewhere = set()
+                        existing_acc = set()
+                        used_ranges_elsewhere = []
+                        for bid, bc in cur.fetchall() or []:
+                            bid_s = str(bid or '').strip()
+                            tokens = [t.strip() for t in str(bc or '').split(',') if t.strip()]
+                            for t in tokens:
+                                try:
+                                    a = str(int(float(t)))
+                                except Exception:
+                                    continue
+                                if str(bid) == str(existing_id):
+                                    existing_acc.add(a)
+                                else:
+                                    used_elsewhere.add(a)
+
+                            # also parse book_id numeric/range as reserved
+                            if bid_s.isdigit():
+                                (existing_acc if str(bid) == str(existing_id) else used_elsewhere).add(bid_s)
+                            m = re.match(r'^(\d+)\s*-\s*(\d+)$', bid_s)
+                            if m and str(bid) != str(existing_id):
+                                try:
+                                    s0 = int(m.group(1)); e0 = int(m.group(2))
+                                    if e0 >= s0:
+                                        used_ranges_elsewhere.append((s0, e0))
+                                except Exception:
+                                    pass
+
+                        # Range overlap check against other books that store ranges
+                        try:
+                            new_start = int(accession_list[0]); new_end = int(accession_list[-1])
+                        except Exception:
+                            new_start = None; new_end = None
+                        if new_start is not None and new_end is not None:
+                            for (s0, e0) in used_ranges_elsewhere:
+                                if not (new_end < s0 or new_start > e0):
+                                    conn.close()
+                                    messagebox.showerror(
+                                        "Error",
+                                        f"Book ID range overlaps with another book's range ({s0}-{e0})."
+                                    )
+                                    return
+
+                        new_unique = [a for a in accession_list if a not in existing_acc]
+                        collision = [a for a in new_unique if a in used_elsewhere]
+                        if collision:
+                            conn.close()
+                            messagebox.showerror(
+                                "Error",
+                                "Some accession numbers are already used by other books:\n" + ", ".join(collision[:25])
+                            )
+                            return
+
+                        merged_acc = sorted(existing_acc.union(new_unique), key=lambda x: int(x))
+                        add_n = len(new_unique)
+                        cur.execute(
+                            "UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ?, barcode = ?, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?",
+                            (add_n, add_n, ','.join(merged_acc), existing_id)
+                        )
+                        copies_added = add_n
+                    else:
+                        cur.execute(
+                            "UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ?, updated_at=CURRENT_TIMESTAMP WHERE book_id = ?",
+                            (copies, copies, existing_id)
+                        )
+                        copies_added = copies
                     conn.commit()
                     conn.close()
                     self._log_admin_activity(
                         "Book Copies Added",
-                        f"Added {copies} copies to existing book '{title_val}' (ID: {existing_id}). New total: {existing_copies + copies}"
+                        f"Added {copies_added} copies to existing book '{title_val}' (ID: {existing_id}). New total: {existing_copies + copies_added}"
                     )
-                    messagebox.showinfo("Success", f"Added {copies} copies to '{title_val}'.\nNew total: {existing_copies + copies} copies.")
+                    messagebox.showinfo("Success", f"Added {copies_added} copies to '{title_val}'.\nNew total: {existing_copies + copies_added} copies.")
                     dialog.destroy()
                     self.refresh_books()
                     self.refresh_dashboard()
                     return
                 # else NO - continue adding as separate entry
+
+            # (Uniqueness already validated above for new insert too)
             # Add book
             success, message = self.db.add_book(
                 book_id_val,
@@ -7017,7 +7591,7 @@ Current Settings:
                 entries['isbn'].get().strip(),
                 entries['category'].get(),
                 copies,
-                entries['barcode'].get().strip() if entries.get('barcode') else '',
+                barcode_csv,
                 price
             )
             if success:
@@ -10732,11 +11306,42 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 if key not in grouped:
                     grouped[key] = {
                         'title': title_val, 'author': author_val,
-                        'publisher': publisher_val, 'copies': 0,
-                        'book_id': acc_val, 'price': price_val, 'sheet': 'bookbank'
+                        'publisher': publisher_val,
+                        'copies': 0,
+                        'book_id': acc_val,
+                        'price': price_val,
+                        'sheet': 'bookbank',
+                        '_acc_list': []
                     }
                 grouped[key]['copies'] += 1   # each row = 1 physical copy
-            return list(grouped.values())
+
+                # Collect accession numbers when present
+                if acc_val:
+                    try:
+                        grouped[key]['_acc_list'].append(str(int(float(acc_val))))
+                    except Exception:
+                        pass
+
+            finalized = []
+            for b in grouped.values():
+                acc_list = b.get('_acc_list', [])
+                # Dedupe but keep order
+                seen = set()
+                acc_list = [x for x in acc_list if not (x in seen or seen.add(x))]
+                first_id, range_str, csv_str = make_accession_info(acc_list)
+
+                copies_val = len(acc_list) if acc_list else max(int(b.get('copies', 1) or 1), 1)
+                finalized.append({
+                    'title': b.get('title', ''),
+                    'author': b.get('author', ''),
+                    'publisher': b.get('publisher', ''),
+                    'copies': copies_val,
+                    'book_id': range_str or first_id or safe_str(b.get('book_id', '')),
+                    'accession_csv': csv_str,
+                    'price': b.get('price', 0.0),
+                    'sheet': b.get('sheet', 'bookbank')
+                })
+            return finalized
 
         try:
             import pandas as pd  # ensure pandas is available in local scope
@@ -10788,7 +11393,22 @@ Note: This is an automated email. Please find the attached formal overdue letter
                     for book in parsed:
                         key = (normalize(book['title']), normalize(book['author']))
                         if key in books_map:
-                            books_map[key]['copies'] += book['copies']
+                            books_map[key]['copies'] += book.get('copies', 0)
+                            # Merge accession lists (copy IDs) when available
+                            ex_csv = safe_str(books_map[key].get('accession_csv', ''))
+                            new_csv = safe_str(book.get('accession_csv', ''))
+                            if new_csv:
+                                ex_list = [x.strip() for x in ex_csv.split(',') if x.strip()] if ex_csv else []
+                                new_list = [x.strip() for x in new_csv.split(',') if x.strip()]
+                                seen = set()
+                                merged = []
+                                for x in ex_list + new_list:
+                                    if x not in seen:
+                                        seen.add(x)
+                                        merged.append(x)
+                                books_map[key]['accession_csv'] = ','.join(merged)
+                                # If we have accession IDs, treat them as the true copy count
+                                books_map[key]['copies'] = max(1, len(merged))
                         else:
                             books_map[key] = dict(book)
 
@@ -10840,67 +11460,155 @@ Note: This is an automated email. Please find the attached formal overdue letter
             conn = self.db.get_connection()
             cur  = conn.cursor()
 
+            def _parse_acc_csv(csv_text):
+                items = []
+                if not csv_text:
+                    return items
+                for x in str(csv_text).split(','):
+                    s = x.strip()
+                    if not s:
+                        continue
+                    try:
+                        items.append(str(int(float(s))))
+                    except Exception:
+                        continue
+                # Dedupe keep order
+                seen = set()
+                out = []
+                for it in items:
+                    if it not in seen:
+                        seen.add(it)
+                        out.append(it)
+                return out
+
+            # Preload existing books for faster matching
+            cur.execute("SELECT book_id, title, author, total_copies, available_copies, barcode FROM books")
+            existing_by_key = {}
+            used_accessions = set()
+            max_numeric_book_id = 1000
+
+            for row in cur.fetchall() or []:
+                ex_book_id = str(row[0])
+                ex_title = str(row[1] or '')
+                ex_author = str(row[2] or '')
+                ex_total = int(row[3] or 0)
+                ex_avail = int(row[4] or 0)
+                ex_barcode = str(row[5] or '')
+
+                ek = (normalize(ex_title), normalize(ex_author))
+                existing_by_key[ek] = (ex_book_id, ex_total, ex_avail, ex_barcode)
+
+                # Track already-used copy IDs (accession numbers) across the whole library
+                for acc in _parse_acc_csv(ex_barcode):
+                    used_accessions.add(acc)
+
+                # For auto-book_id generation
+                try:
+                    if ex_book_id.isdigit():
+                        max_numeric_book_id = max(max_numeric_book_id, int(ex_book_id))
+                except Exception:
+                    pass
+
+            # Single transaction for speed
+            try:
+                cur.execute("BEGIN")
+            except Exception:
+                pass
+
             for key, book in books_map.items():
                 try:
-                    title_val     = book['title']
-                    author_val    = book['author']
-                    copies_val    = max(book['copies'], 1)
-                    book_id_v     = book.get('book_id', '')
-                    publisher     = book.get('publisher', '')
-                    price_val     = book.get('price', 0.0)
-                    accession_csv = book.get('accession_csv', '')  # e.g. "8264,8265,8266"
+                    title_val     = safe_str(book.get('title', ''))
+                    author_val    = safe_str(book.get('author', ''))
+                    if not title_val:
+                        continue
 
-                    # ── KEY RULE: Same title + same author → MERGE copies ──
-                    cur.execute(
-                        "SELECT book_id, total_copies, barcode FROM books "
-                        "WHERE LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(author))=LOWER(TRIM(?))",
-                        (title_val, author_val)
-                    )
-                    existing = cur.fetchone()
+                    copies_val    = max(int(book.get('copies', 1) or 1), 1)
+                    book_id_v     = safe_str(book.get('book_id', ''))
+                    publisher     = safe_str(book.get('publisher', ''))
+                    price_val     = float(book.get('price', 0.0) or 0.0)
 
-                    if existing:
-                        ex_book_id, ex_total, ex_barcode = existing
-                        # Append new accession numbers to existing barcode list
-                        if accession_csv:
-                            new_barcode = ','.join(filter(None, [ex_barcode or '', accession_csv]))
+                    acc_list = _parse_acc_csv(book.get('accession_csv', ''))
+                    acc_set = set(acc_list)
+
+                    if key in existing_by_key:
+                        ex_book_id, ex_total, ex_avail, ex_barcode = existing_by_key[key]
+                        ex_acc_list = _parse_acc_csv(ex_barcode)
+                        ex_acc_set = set(ex_acc_list)
+                        other_used = used_accessions - ex_acc_set
+
+                        # Allow accession numbers already belonging to this book; reject those used by other books
+                        if acc_set:
+                            acc_set = {a for a in acc_set if a not in other_used}
+                            union_acc = list(ex_acc_set.union(acc_set))
+                            # Stable numeric sort when possible
+                            try:
+                                union_acc.sort(key=lambda x: int(x))
+                            except Exception:
+                                union_acc.sort()
+                            new_barcode = ','.join(union_acc)
+
+                            new_total = max(ex_total, len(union_acc))
                         else:
+                            # Idempotent behavior when we don't have per-copy IDs: treat import as ABSOLUTE
                             new_barcode = ex_barcode or ''
-                        cur.execute(
-                            "UPDATE books SET total_copies=total_copies+?, available_copies=available_copies+?, "
-                            "barcode=? WHERE book_id=?",
-                            (copies_val, copies_val, new_barcode, ex_book_id)
-                        )
-                        conn.commit()
-                        merged_count += 1
-                    else:
-                        # Ensure unique book_id (range string like "8264-8266")
-                        if not book_id_v:
-                            cur.execute("SELECT MAX(CAST(book_id AS INTEGER)) FROM books WHERE book_id GLOB '[0-9]*'")
-                            max_id = cur.fetchone()[0] or 1000
-                            book_id_v = str(max_id + 1)
-                        # Resolve collision (append suffix if needed)
-                        orig_id = book_id_v
-                        suffix  = 0
-                        while True:
-                            cur.execute("SELECT COUNT(*) FROM books WHERE book_id=?", (book_id_v,))
-                            if cur.fetchone()[0] == 0:
-                                break
-                            suffix += 1
-                            book_id_v = f"{orig_id}-{suffix}"
+                            new_total = max(ex_total, copies_val)
 
-                        cur.execute(
-                            "INSERT INTO books (book_id,title,author,isbn,category,"
-                            "total_copies,available_copies,barcode,price) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (book_id_v, title_val, author_val, publisher,
-                             'Technology', copies_val, copies_val, accession_csv or None, price_val)
-                        )
-                        conn.commit()
-                        success_count += 1
+                        issued = max(ex_total - ex_avail, 0)
+                        new_avail = max(new_total - issued, 0)
+
+                        # Only write if something changes
+                        if new_total != ex_total or new_avail != ex_avail or (acc_set and new_barcode != (ex_barcode or '')):
+                            cur.execute(
+                                "UPDATE books SET total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP WHERE book_id=?",
+                                (new_total, new_avail, new_barcode or None, price_val, ex_book_id)
+                            )
+                        existing_by_key[key] = (ex_book_id, new_total, new_avail, new_barcode)
+                        used_accessions.update(_parse_acc_csv(new_barcode))
+                        merged_count += 1
+                        continue
+
+                    # New book insert
+                    if acc_set:
+                        # Reject accessions that already exist anywhere
+                        acc_set = {a for a in acc_set if a not in used_accessions}
+                        acc_list = [a for a in acc_list if a in acc_set]
+                        try:
+                            acc_list.sort(key=lambda x: int(x))
+                        except Exception:
+                            acc_list.sort()
+                        accession_csv = ','.join(acc_list)
+                        copies_val = max(1, len(acc_list))
+                    else:
+                        accession_csv = ''
+
+                    # Ensure unique book_id
+                    if not book_id_v:
+                        max_numeric_book_id += 1
+                        book_id_v = str(max_numeric_book_id)
+
+                    orig_id = book_id_v
+                    suffix  = 0
+                    while True:
+                        cur.execute("SELECT 1 FROM books WHERE book_id=? LIMIT 1", (book_id_v,))
+                        if not cur.fetchone():
+                            break
+                        suffix += 1
+                        book_id_v = f"{orig_id}-{suffix}"
+
+                    cur.execute(
+                        "INSERT INTO books (book_id,title,author,isbn,category,total_copies,available_copies,barcode,price,updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                        (book_id_v, title_val, author_val, publisher, 'Technology', copies_val, copies_val, accession_csv or None, price_val)
+                    )
+                    used_accessions.update(_parse_acc_csv(accession_csv))
+                    existing_by_key[key] = (book_id_v, copies_val, copies_val, accession_csv)
+                    success_count += 1
 
                 except Exception as e:
                     error_count += 1
                     errors.append(f"'{book.get('title','?')}': {e}")
 
+            conn.commit()
             conn.close()
 
             # ── Summary ──────────────────────────────────────────────────────
