@@ -1,107 +1,33 @@
-import { useState, useEffect } from 'react';
-import axios from 'axios';
-import { useNavigate } from 'react-router-dom';
-import { Book, AlertCircle, Clock, CheckCircle2, Megaphone, TrendingUp, RefreshCw } from 'lucide-react';
-import Card from '../components/ui/Card';
-import Button from '../components/ui/Button';
-import Skeleton from '../components/ui/Skeleton';
-import ErrorMessage from '../components/ui/ErrorMessage';
-import EmptyState from '../components/ui/EmptyState';
-import BookLoanCard from '../components/BookLoanCard';
+import re
 
-export default function Dashboard({ user }) {
-  const navigate = useNavigate();
-  const [data, setData] = useState({ 
-    borrows: [], 
-    history: [], 
-    notices: [], 
-    notifications: [],
-    recent_requests: [],
-    analytics: { badges: [], stats: {} }
-  });
-  const [loading, setLoading] = useState(true);
-  const [profilePhoto, setProfilePhoto] = useState(null);
-  const [renewingBookId, setRenewingBookId] = useState(null);
+with open('src/pages/Dashboard.jsx', 'r', encoding='utf-8') as f:
+    content = f.read()
 
-  // Load profile photo from localStorage (user-specific)
-  useEffect(() => {
-    if (user?.enrollment_no) {
-      const savedPhoto = localStorage.getItem(`profilePhoto_${user.enrollment_no}`);
-      if (savedPhoto) {
-        setProfilePhoto(savedPhoto);
-      }
-    }
-  }, [user]);
+# 1. Update avatar
+content = content.replace(
+    "`https://ui-avatars.com/api/?name=${encodeURIComponent(user?.name || 'Student')}&background=3b82f6&color=fff&size=128&bold=true`",
+    "`https://ui-avatars.com/api/?name=${encodeURIComponent((user?.name || 'Student').split(' ').map(n=>n[0]).join('').substring(0,2))}&background=3b82f6&color=fff&size=128&bold=true`"
+)
 
-  // Use actual user data from session
-  // Normalize year for display
-  let displayYear = "N/A";
-  if (user?.year) {
-    const y = String(user.year).trim().toLowerCase();
-    if (["pass out", "passout", "passed out", "alumni", "graduate"].includes(y)) {
-      displayYear = "Pass Out";
-    } else {
-      displayYear = user.year;
-    }
-  }
-  const displayUser = {
-    name: user?.name || "Student",
-    year: displayYear,
-    department: user?.department || "Computer Department",
-    avatar: profilePhoto || `https://ui-avatars.com/api/?name=${encodeURIComponent((user?.name || 'Student').split(' ').map(n=>n[0]).join('').substring(0,2))}&background=3b82f6&color=fff&size=128&bold=true`
-  };
-
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async () => {
+# 2. Extract and replace the formatDate helper with formatRelativeDate
+old_date_helper = """  // Helper to safely format dates from "YYYY-MM-DD HH:MM:SS"
+  const formatDate = (dateStr) => {
+    if (!dateStr) return 'Recently';
     try {
-      const { data } = await axios.get('/api/dashboard');
-      setData(data);
+        // Replace space with T for ISO compatibility
+        const isoStr = dateStr.replace(' ', 'T');
+        return new Date(isoStr).toLocaleDateString(undefined, { 
+            month: 'short', 
+            day: 'numeric', 
+            hour: '2-digit', 
+            minute: '2-digit' 
+        });
     } catch (e) {
-      console.error("Failed to fetch dashboard, using fallback state if needed", e);
-    } finally {
-      setLoading(false);
+        return dateStr;
     }
-  };
+  };"""
 
-  if (loading) return <DashboardSkeleton />;
-  if (!data && !loading) return (
-    <div className="p-6">
-      <ErrorMessage message="Failed to load your dashboard." onRetry={fetchData} />
-    </div>
-  );
-
-  const overdueBooks = (data.borrows || []).filter(b => b.status === 'overdue');
-  const activeBorrows = data.borrows || [];
-
-  const handleRenew = async (book) => {
-    setRenewingBookId(book.accession_no || book.book_id);
-    try {
-      await axios.post('/api/request', {
-        type: 'renewal',
-        details: JSON.stringify({ book_id: book.book_id, accession_no: book.accession_no || book.book_id, title: book.title })
-      });
-      alert('Renewal request sent to librarian for approval.');
-      fetchData();
-    } catch (e) {
-      const msg = e.response?.data?.error || e.response?.data?.message || 'Failed to submit renewal request';
-      alert(msg);
-    } finally {
-      setRenewingBookId(null);
-    }
-  };
-
-  const getLoanStatus = (book) => {
-    if (book.status === 'overdue') return 'overdue';
-    // Parser for "5 days left" logic
-    const days = parseInt(book.days_msg?.replace(/\D/g, '') || '10', 10);
-    if (days <= 3) return 'due_soon';
-    return 'normal';
-  };
-
-  // Helper to safely format relative dates from "YYYY-MM-DD HH:MM:SS"
+new_date_helper = """  // Helper to safely format relative dates from "YYYY-MM-DD HH:MM:SS"
   const formatRelativeDate = (dateStr) => {
     if (!dateStr) return 'Recently';
     try {
@@ -130,9 +56,14 @@ export default function Dashboard({ user }) {
         const isoStr = dateStr.replace(' ', 'T');
         return new Date(isoStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     } catch (e) { return dateStr; }
-  };
+  };"""
 
-  return (
+content = content.replace(old_date_helper, new_date_helper)
+
+# 3. Completely replace the main return UI area
+ui_start = content.find('  return (\n    <div className="min-h-screen')
+
+ui_new = """  return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 pb-24 md:pb-10 transition-colors">
       <div className="px-4 py-6 space-y-8 max-w-5xl mx-auto">
         
@@ -326,3 +257,10 @@ function DashboardSkeleton() {
     </div>
   );
 }
+"""
+
+content = content[:ui_start] + ui_new
+
+with open('src/pages/Dashboard.jsx', 'w', encoding='utf-8') as f:
+    f.write(content)
+print("Dashboard updated successfully.")
