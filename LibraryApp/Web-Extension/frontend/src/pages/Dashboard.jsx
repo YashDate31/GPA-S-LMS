@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
-import { Book, AlertCircle, Clock, CheckCircle2, Megaphone, TrendingUp, RefreshCw } from 'lucide-react';
+import { Book, AlertCircle, Clock, CheckCircle2, Megaphone, TrendingUp, RefreshCw, IndianRupee } from 'lucide-react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Skeleton from '../components/ui/Skeleton';
@@ -205,19 +205,19 @@ export default function Dashboard({ user }) {
         </div>
 
         {/* 2. Secondary: Stats Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
                   <div>
                       <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Borrowed</p>
-                      <p className="text-xl font-black text-slate-800 dark:text-white mt-0.5">{activeBorrows.length}</p>
-                      <p className="text-[10px] text-slate-400 mt-1">{activeBorrows.length === 0 ? 'No current loans' : `1 of 3 books borrowed`}</p>
+                      <p className="text-xl font-black text-slate-800 dark:text-white mt-0.5">{data.summary?.borrowed_count ?? activeBorrows.length}</p>
+                      <p className="text-[10px] text-slate-400 mt-1">{activeBorrows.length === 0 ? 'No current loans' : `Active library loans`}</p>
                   </div>
                   <div className="w-10 h-10 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full flex items-center justify-center"><Book size={18} /></div>
               </Card>
               <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
                   <div>
                       <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Returned</p>
-                      <p className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5">{data.history?.length || 0}</p>
+                      <p className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5">{data.summary?.returned_count ?? data.history?.length ?? 0}</p>
                       <p className="text-[10px] text-slate-400 mt-1">Total books returned</p>
                   </div>
                   <div className="w-10 h-10 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center"><CheckCircle2 size={18} /></div>
@@ -226,11 +226,23 @@ export default function Dashboard({ user }) {
                   <div>
                       <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Overdue</p>
                       <p className={`text-xl font-black mt-0.5 ${overdueBooks.length > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400 dark:text-slate-600'}`}>
-                          {overdueBooks.length}
+                          {data.summary?.overdue_count ?? overdueBooks.length}
                       </p>
                       <p className="text-[10px] text-slate-400 mt-1">{overdueBooks.length === 0 ? 'No overdue fines 🎉' : 'Action required immediately'}</p>
                   </div>
                   <div className={`w-10 h-10 rounded-full flex items-center justify-center ${overdueBooks.length > 0 ? 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500'}`}><AlertCircle size={18} /></div>
+              </Card>
+              <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+                  <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Active Fine</p>
+                      <p className={`text-xl font-black mt-0.5 ${(data.summary?.active_fine || 0) > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400 dark:text-slate-600'}`}>
+                          ₹{data.summary?.active_fine ?? 0}
+                      </p>
+                      <p className="text-[10px] text-slate-400 mt-1">{(data.summary?.active_fine || 0) > 0 ? 'Fine pending clearance' : 'No outstanding fines'}</p>
+                  </div>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${(data.summary?.active_fine || 0) > 0 ? 'bg-red-50 dark:bg-red-900/30 text-red-500 dark:text-red-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      <IndianRupee size={18} />
+                  </div>
               </Card>
         </div>
 
