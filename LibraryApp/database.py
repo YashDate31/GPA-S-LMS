@@ -390,6 +390,29 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Tombstones for robust bidirectional sync of deletions (prevents "deleted row comes back")
+        # NOTE: synced_remote is local-only bookkeeping; on Postgres it is omitted.
+        self.create_table_safe(cursor, 'sync_deletions', '''
+            CREATE TABLE IF NOT EXISTS sync_deletions (
+                id SERIAL PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                pk_value TEXT NOT NULL,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT DEFAULT 'desktop',
+                UNIQUE(table_name, pk_value)
+            )
+        ''', sqlite_sql='''
+            CREATE TABLE IF NOT EXISTS sync_deletions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                pk_value TEXT NOT NULL,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT DEFAULT 'desktop',
+                synced_remote INTEGER DEFAULT 0,
+                UNIQUE(table_name, pk_value)
+            )
+        ''')
         
         conn.commit()
         
@@ -591,6 +614,28 @@ class Database:
 
         
         conn.close()
+
+    def _log_deletion_in_tx(self, cursor, table_name, pk_value, source='desktop'):
+        """Log a deletion tombstone within an existing SQLite transaction."""
+        try:
+            cursor.execute(
+                "INSERT OR REPLACE INTO sync_deletions (table_name, pk_value, deleted_at, source, synced_remote) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP, ?, 0)",
+                (str(table_name), str(pk_value), str(source))
+            )
+        except Exception:
+            # Table might not exist yet (very old DB) or other non-fatal issues.
+            pass
+
+    def log_deletion(self, table_name, pk_value, source='desktop'):
+        """Log a deletion tombstone (outside of another transaction)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            self._log_deletion_in_tx(cursor, table_name, pk_value, source=source)
+            conn.commit()
+        finally:
+            conn.close()
         
     # No automatic sample data insertion (clean production build)
     
@@ -701,8 +746,8 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute('''
-                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
             conn.commit()
             self._push_to_cloud('''
@@ -1103,6 +1148,9 @@ class Database:
                 return False, "Student not found"
             
             student_name = student[0]
+
+            # Record a deletion tombstone for sync BEFORE deleting the row.
+            self._log_deletion_in_tx(cursor, 'students', enrollment_no, source='desktop')
             
             # CASCADE DELETE: Delete all related records first
             # 1. Delete promotion history
@@ -1123,6 +1171,18 @@ class Database:
             cursor.execute('DELETE FROM students WHERE enrollment_no = ?', (enrollment_no,))
             
             conn.commit()
+
+            # Best-effort cloud propagation (prevents auto-sync from resurrecting deleted rows)
+            self._push_to_cloud(
+                "INSERT INTO sync_deletions (table_name, pk_value, deleted_at, source) VALUES (?, ?, CURRENT_TIMESTAMP, ?) "
+                "ON CONFLICT (table_name, pk_value) DO UPDATE SET deleted_at=EXCLUDED.deleted_at, source=EXCLUDED.source",
+                ('students', str(enrollment_no), 'desktop')
+            )
+            # Mirror dependency cleanup to cloud to satisfy FK constraints, then delete student
+            self._push_to_cloud('DELETE FROM promotion_history WHERE enrollment_no = ?', (enrollment_no,))
+            self._push_to_cloud('DELETE FROM borrow_records WHERE enrollment_no = ? AND status = "returned"', (enrollment_no,))
+            self._push_to_cloud('DELETE FROM waitlist WHERE enrollment_no = ?', (enrollment_no,))
+            self._push_to_cloud('DELETE FROM students WHERE enrollment_no = ?', (enrollment_no,))
             
             # Build detailed success message
             details = []
@@ -1171,6 +1231,9 @@ class Database:
                 return False, "Book not found"
             book_title = row[0] if row else str(book_id)
 
+            # Record tombstone BEFORE deleting.
+            self._log_deletion_in_tx(cursor, 'books', book_id, source='desktop')
+
             # Block delete if there are active borrows
             cursor.execute('''
                 SELECT COUNT(*) FROM borrow_records 
@@ -1209,6 +1272,11 @@ class Database:
             conn.commit()
             
             # Push dependency cleanup + delete to cloud (best-effort)
+            self._push_to_cloud(
+                "INSERT INTO sync_deletions (table_name, pk_value, deleted_at, source) VALUES (?, ?, CURRENT_TIMESTAMP, ?) "
+                "ON CONFLICT (table_name, pk_value) DO UPDATE SET deleted_at=EXCLUDED.deleted_at, source=EXCLUDED.source",
+                ('books', str(book_id), 'desktop')
+            )
             self._push_to_cloud('DELETE FROM borrow_records WHERE book_id = ? AND status != "borrowed"', (book_id,))
             self._push_to_cloud('DELETE FROM transactions WHERE book_id = ?', (book_id,))
             self._push_to_cloud('DELETE FROM book_waitlist WHERE book_id = ?', (book_id,))
@@ -1462,32 +1530,190 @@ class Database:
 
 
     def clear_all_data(self):
-        """Completely remove all students, books and borrow records.
+        """Clear ALL rows from ALL local SQLite tables used by the app.
+
+        This is a LOCAL wipe only. For local + Supabase wipe, use clear_all_data_everywhere().
         Returns (success: bool, message: str).
-        Order matters due to foreign key references: borrow_records first, then books & students.
         """
         conn = self.get_connection()
+        try:
+            ok, msg = self._wipe_sqlite_connection(conn)
+            return ok, msg
+        except Exception as e:
+            return False, f"Error clearing local data: {e}"
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _wipe_sqlite_connection(self, conn):
+        """Delete all rows from all user tables in a SQLite connection."""
         cursor = conn.cursor()
         try:
-            # Disable foreign key constraints temporarily (just in case)
+            # Disable foreign keys so we can delete in any order
             try:
                 cursor.execute('PRAGMA foreign_keys = OFF;')
             except Exception:
                 pass
 
-            cursor.execute('DELETE FROM borrow_records')
-            cursor.execute('DELETE FROM books')
-            cursor.execute('DELETE FROM students')
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = [r[0] for r in cursor.fetchall()]
+
+            for t in tables:
+                try:
+                    cursor.execute(f'DELETE FROM "{t}"')
+                except Exception:
+                    # ignore missing/problem tables (defensive)
+                    pass
+
             conn.commit()
-            return True, "All data cleared successfully"
-        except Exception as e:
-            return False, f"Error clearing data: {e}"
+            return True, f"Local: cleared {len(tables)} tables"
         finally:
             try:
                 cursor.execute('PRAGMA foreign_keys = ON;')
             except Exception:
                 pass
-            conn.close()
+
+    def _wipe_sqlite_file(self, db_path, label='SQLite DB'):
+        """Wipe an on-disk SQLite file if it exists."""
+        try:
+            import sqlite3
+            if not db_path or not os.path.exists(db_path):
+                return True, f"{label}: not found (skipped)"
+            c = sqlite3.connect(db_path, timeout=30)
+            try:
+                ok, msg = self._wipe_sqlite_connection(c)
+                return ok, f"{label}: {msg}"
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            return False, f"{label}: failed - {e}"
+
+    def _wipe_supabase(self):
+        """Synchronously wipe Supabase/Postgres tables used by this app.
+
+        Returns (ok: bool, message: str)
+        """
+        db_url = (self.database_url or os.getenv('DATABASE_URL') or '').strip()
+        if not db_url:
+            return False, "Supabase: DATABASE_URL is missing"
+        if not POSTGRES_AVAILABLE or psycopg2 is None:
+            return False, "Supabase: psycopg2 is not installed/available"
+
+        # Tables we may use across desktop + portal
+        target_tables = [
+            'borrow_records',
+            'transactions',
+            'books',
+            'students',
+            'promotion_history',
+            'academic_years',
+            'system_settings',
+            'sync_deletions',
+            # Portal / extended features (only cleared if they exist)
+            'admin_activity',
+            'requests',
+            'deletion_requests',
+            'student_auth',
+            'notices',
+            'password_reset_requests',
+            'study_materials',
+            'email_queue',
+            'email_history',
+        ]
+
+        conn = None
+        try:
+            conn = psycopg2.connect(db_url)
+            conn.autocommit = True
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_type = 'BASE TABLE'
+                """
+            )
+            existing = {r[0] for r in cur.fetchall()}
+            to_clear = [t for t in target_tables if t in existing]
+
+            if not to_clear:
+                return True, "Supabase: no matching tables found (nothing to clear)"
+
+            cleared = 0
+            failed = []
+            for t in to_clear:
+                try:
+                    cur.execute(f'TRUNCATE TABLE "public"."{t}" RESTART IDENTITY CASCADE')
+                    cleared += 1
+                except Exception as e1:
+                    try:
+                        cur.execute(f'DELETE FROM "public"."{t}"')
+                        cleared += 1
+                    except Exception as e2:
+                        failed.append(f"{t}: {e2}")
+
+            if failed:
+                return False, f"Supabase: cleared {cleared} tables, failed: {failed[0]}"
+            return True, f"Supabase: cleared {cleared} tables"
+        except Exception as e:
+            return False, f"Supabase: failed - {e}"
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def clear_all_data_everywhere(self, clear_supabase=True, clear_portal_db=True):
+        """Clear data from local SQLite + (optionally) Supabase + (optionally) portal.db.
+
+        This preserves schema; it removes only rows.
+        Returns (success: bool, message: str)
+        """
+        msgs = []
+        ok_all = True
+
+        # 1) Local main DB
+        conn = self.get_connection()
+        try:
+            ok, msg = self._wipe_sqlite_connection(conn)
+            ok_all = ok_all and ok
+            msgs.append(msg)
+        except Exception as e:
+            ok_all = False
+            msgs.append(f"Local: failed - {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # 2) Optional portal DB (Web-Extension)
+        if clear_portal_db:
+            try:
+                base_dir = os.path.dirname(__file__)
+                portal_db_path = os.path.join(base_dir, 'Web-Extension', 'portal.db')
+                ok, msg = self._wipe_sqlite_file(portal_db_path, label='Local portal.db')
+                ok_all = ok_all and ok
+                msgs.append(msg)
+            except Exception as e:
+                ok_all = False
+                msgs.append(f"Local portal.db: failed - {e}")
+
+        # 3) Optional Supabase wipe
+        if clear_supabase:
+            ok, msg = self._wipe_supabase()
+            ok_all = ok_all and ok
+            msgs.append(msg)
+
+        return ok_all, "\n".join(msgs)
     
     def verify_data_integrity(self):
         """Verify and fix data integrity issues - CODD's Rules enforcement"""
