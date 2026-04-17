@@ -1066,41 +1066,186 @@ class SyncManager:
         except Exception as e:
             print(f"Error syncing portal table {table_name} local to remote: {e}")
             return 0
-    
+
+    def _sync_table_full_mirror(self, local_conn, remote_conn, table_name):
+        """Full mirror: make local EXACTLY match remote (cloud is authoritative).
+
+        Unlike the delta sync, this:
+        1. Fetches ALL rows from remote.
+        2. Deletes local rows whose natural key is NOT present in remote.
+        3. Upserts all remote rows into local.
+
+        Used on startup so that clearing Supabase propagates to local.
+        """
+        try:
+            local_cursor = local_conn.cursor()
+            remote_cursor = remote_conn.cursor()
+
+            # Check table exists remotely before touching local
+            remote_cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables WHERE table_name = %s
+                )
+            """, (table_name,))
+            if not remote_cursor.fetchone()[0]:
+                return 0
+
+            # Pull all remote rows
+            remote_cursor.execute(f"SELECT * FROM {table_name}")
+            remote_rows = remote_cursor.fetchall()
+            all_remote_columns = [desc[0] for desc in remote_cursor.description]
+
+            natural_key = self._NATURAL_KEY_MAP.get(table_name)
+            if not natural_key:
+                # No natural key → skip destructive mirror for safety (log/audit tables)
+                return 0
+
+            # Build set of remote natural keys
+            remote_key_set = set()
+            for row in remote_rows:
+                row_dict = dict(zip(all_remote_columns, row))
+                key = tuple(str(row_dict.get(k) or '').replace(' ', '') for k in natural_key)
+                remote_key_set.add(key)
+
+            # Delete local rows NOT present in remote (cloud has authority)
+            local_cursor.execute(f"SELECT * FROM {table_name}")
+            local_rows = local_cursor.fetchall()
+            local_all_cols = [desc[0] for desc in local_cursor.description]
+
+            deleted = 0
+            for lrow in local_rows:
+                ldict = dict(zip(local_all_cols, lrow))
+                lkey = tuple(str(ldict.get(k) or '').replace(' ', '') for k in natural_key)
+                if lkey not in remote_key_set:
+                    where = ' AND '.join([f"{k} = ?" for k in natural_key])
+                    vals = [ldict.get(k) for k in natural_key]
+                    local_cursor.execute(f"DELETE FROM {table_name} WHERE {where}", vals)
+                    deleted += 1
+
+            if deleted > 0:
+                print(f"[Full Mirror] {table_name}: removed {deleted} local rows not in Supabase")
+
+            # Now upsert all remote rows into local (reuse delta sync logic)
+            SKIP_COLS = {'id'}
+            local_cursor.execute(f"PRAGMA table_info({table_name})")
+            local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
+            payload_columns = [
+                c for c in all_remote_columns
+                if c.lower() not in SKIP_COLS and c.lower() in local_col_names
+            ]
+
+            upserted = 0
+            for row in remote_rows:
+                row_dict = dict(zip(all_remote_columns, row))
+                key_vals = [row_dict.get(k) for k in natural_key]
+                if any(v is None for v in key_vals):
+                    continue
+                # Normalize book_id whitespace
+                if table_name == 'books':
+                    key_vals = [str(v).replace(' ', '') if v is not None else v for v in key_vals]
+
+                where = ' AND '.join([f"{k} = ?" for k in natural_key])
+                local_cursor.execute(f"SELECT 1 FROM {table_name} WHERE {where} LIMIT 1", key_vals)
+                exists = local_cursor.fetchone()
+
+                payload_vals = [row_dict.get(c) for c in payload_columns]
+                if exists:
+                    update_cols = [c for c in payload_columns if c not in natural_key]
+                    if update_cols:
+                        set_clause = ', '.join([f"{c} = ?" for c in update_cols])
+                        update_vals = [row_dict.get(c) for c in update_cols] + key_vals
+                        local_cursor.execute(f"UPDATE {table_name} SET {set_clause} WHERE {where}", update_vals)
+                else:
+                    placeholders = ', '.join(['?'] * len(payload_columns))
+                    cols_str = ', '.join(payload_columns)
+                    local_cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", payload_vals)
+                upserted += 1
+
+            local_conn.commit()
+            print(f"[Full Mirror] {table_name}: {len(remote_rows)} remote rows → {upserted} upserted, {deleted} pruned locally")
+            return upserted
+
+        except Exception as e:
+            print(f"[Full Mirror] Error mirroring {table_name}: {e}")
+            return 0
+
+    def _enforce_local_unique_constraints(self, local_conn):
+        """Add unique indexes to local SQLite tables to prevent future duplicates."""
+        cur = local_conn.cursor()
+        constraints = [
+            # borrow_records: same student can't borrow the same specific copy on the same date twice
+            ("borrow_records", "idx_borrow_unique",
+             "enrollment_no, accession_no, borrow_date"),
+        ]
+        for table, idx_name, cols in constraints:
+            try:
+                cur.execute(f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS {idx_name}
+                    ON {table} ({cols})
+                """)
+                local_conn.commit()
+            except Exception as e:
+                # If duplicates still exist this will fail — that's OK, dedup first
+                print(f"[Constraints] Could not add {idx_name}: {e}")
+
     def auto_sync_daemon(self, interval_minutes=5):
         """Run automatic sync in background thread.
-        
-        Performs an immediate initial sync (remote→local) so the desktop
-        starts with the latest cloud data, then continues syncing
-        bidirectionally on the given interval.
+
+        ARCHITECTURE: Supabase is the source of truth.
+        - Startup: Full mirror — local mirrors Supabase exactly.
+          If you clear Supabase, local clears too on next start.
+        - Offline: Uses local SQLite cache automatically.
+        - Periodic: Delta sync (bidirectional) every interval_minutes.
         """
         def sync_loop():
-            # Initial sync: pull cloud data into local SQLite
-            print(f"[Auto-Sync] Initial sync (cloud → local) started...")
+            # --- Step 1: Enforce local unique constraints ---
             try:
-                result = self.sync_now(direction='remote_to_local')
-                if result.get('success'):
-                    print(f"[Auto-Sync] Initial pull complete: {result.get('records_synced', 0)} records")
-                else:
-                    errors = result.get('errors', result.get('error', 'Unknown'))
-                    print(f"[Auto-Sync] Initial pull had issues: {errors}")
+                lc = sqlite3.connect(self.local_db_path)
+                self._enforce_local_unique_constraints(lc)
+                lc.close()
             except Exception as e:
-                print(f"[Auto-Sync] Initial pull failed: {e}")
+                print(f"[Auto-Sync] Constraint setup warning: {e}")
+
+            # --- Step 2: Full mirror on startup (Supabase → local, destructive) ---
+            print(f"[Auto-Sync] Startup FULL MIRROR (Supabase is authoritative)...")
+            try:
+                if psycopg2 is None:
+                    raise RuntimeError("psycopg2 not installed")
+                local_conn = sqlite3.connect(self.local_db_path)
+                remote_conn = psycopg2.connect(
+                    self.remote_config,
+                    connect_timeout=8, keepalives=1,
+                    keepalives_idle=30, keepalives_interval=10, keepalives_count=3
+                )
+                mirror_tables = ['students', 'books', 'borrow_records',
+                                 'academic_years', 'promotion_history', 'system_settings']
+                total = 0
+                for tbl in mirror_tables:
+                    total += self._sync_table_full_mirror(local_conn, remote_conn, tbl)
+                remote_conn.close()
+                local_conn.close()
+                self._register_sync_success()
+                self._save_sync_time(status='completed')
+                print(f"[Auto-Sync] Full mirror complete: {total} records synced")
+            except Exception as e:
+                print(f"[Auto-Sync] Full mirror failed (offline?): {e}")
+                print(f"[Auto-Sync] Running in OFFLINE mode — using local SQLite cache")
+
             next_run_ts = time.time() + (interval_minutes * 60)
             cycle_count = 0
             while True:
                 now = time.time()
                 if now < next_run_ts:
-                    # Short sleep keeps daemon responsive without busy loop
                     time.sleep(min(5, max(1, next_run_ts - now)))
                     continue
 
                 print(f"[Auto-Sync] Background sync at {datetime.now().strftime('%H:%M:%S')}")
                 try:
                     cycle_count += 1
-                    # Periodic sync: use a lighter table set to avoid re-pulling the heavy books table.
-                    # Full sync still happens on startup/manual sync.
-                    light_tables = ['students', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'system_settings', 'requests', 'deletion_requests', 'student_auth', 'notices']
+                    # Periodic delta sync (light — delta since last sync)
+                    light_tables = ['students', 'borrow_records', 'admin_activity',
+                                    'academic_years', 'promotion_history', 'system_settings',
+                                    'requests', 'deletion_requests', 'student_auth', 'notices']
                     tables_for_run = list(light_tables)
                     # Every 4th cycle, include books for eventual consistency
                     if cycle_count % 4 == 0:
@@ -1114,19 +1259,17 @@ class SyncManager:
                         print(f"[Auto-Sync] Completed with issues: {errors}")
                         backoff = self._compute_backoff_seconds()
                         if backoff > 0:
-                            print(f"[Auto-Sync] Backoff active: retry in {backoff}s (failure #{self.consecutive_failures})")
+                            print(f"[Auto-Sync] Backoff: retry in {backoff}s (failure #{self.consecutive_failures})")
                         next_run_ts = time.time() + max(interval_minutes * 60, backoff)
                 except Exception as e:
                     print(f"[Auto-Sync] Exception: {e}")
                     self._register_sync_failure(e)
                     backoff = self._compute_backoff_seconds()
-                    if backoff > 0:
-                        print(f"[Auto-Sync] Backoff after exception: retry in {backoff}s")
                     next_run_ts = time.time() + max(interval_minutes * 60, backoff)
-        
+
         thread = threading.Thread(target=sync_loop, daemon=True)
         thread.start()
-        print(f"[Auto-Sync] Daemon started (initial pull + every {interval_minutes} min)")
+        print(f"[Auto-Sync] Daemon started (full mirror on startup + delta every {interval_minutes} min)")
 
 
 def create_sync_manager(db):
