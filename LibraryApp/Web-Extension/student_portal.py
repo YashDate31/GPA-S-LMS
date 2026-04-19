@@ -2552,58 +2552,6 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
 </body>
 </html>"""
 
-@app.route('/api/renew', methods=['POST'])
-def api_auto_renew():
-    """Automatically extend the due date of a borrowed book by 2 days."""
-    if 'student_id' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-
-    data = request.json
-    book_id = data.get('book_id')
-    if not book_id:
-        return jsonify({'status': 'error', 'message': 'Book ID required'}), 400
-
-    enrollment = session['student_id']
-
-    try:
-        conn = get_library_db()
-        cursor = conn.cursor()
-
-        # Find the active borrow record
-        cursor.execute(
-            "SELECT due_date FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL ORDER BY borrow_date DESC LIMIT 1",
-            (book_id, enrollment)
-        )
-        record = cursor.fetchone()
-
-        if not record:
-            conn.close()
-            return jsonify({'status': 'error', 'message': 'No active loan found for this book'}), 404
-
-        current_due = record['due_date']
-        try:
-            due_d = datetime.strptime(str(current_due), '%Y-%m-%d')
-        except Exception:
-            due_d = datetime.now()
-
-        new_due = due_d + timedelta(days=2)
-        new_due_str = new_due.strftime('%Y-%m-%d')
-
-        cursor.execute(
-            "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
-            (new_due_str, book_id, enrollment)
-        )
-        conn.commit()
-        conn.close()
-
-        return jsonify({
-            'status': 'success',
-            'message': f'Due date extended to {new_due.strftime("%d %b %Y")}',
-            'new_due_date': new_due_str
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': f'Renewal failed: {str(e)}'}), 500
-
 
 @app.route('/api/request', methods=['POST'])
 def api_submit_request():
@@ -2654,6 +2602,58 @@ def api_submit_request():
                 except:
                     continue
             conn_dup.close()
+
+    # Prevent duplicate book requests and enforce borrow limits
+    if req_type == 'book_request':
+        try:
+            parsed = json.loads(details) if isinstance(details, str) else details
+            book_id = parsed.get('book_id') if isinstance(parsed, dict) else None
+        except:
+            book_id = None
+            
+        if book_id:
+            # 1. Check for pending requests for the same book
+            conn_dup = get_portal_db()
+            cur_dup = conn_dup.cursor()
+            cur_dup.execute(
+                "SELECT details FROM requests WHERE enrollment_no = ? AND request_type = 'book_request' AND status = 'pending'",
+                (session['student_id'],)
+            )
+            for row in cur_dup.fetchall():
+                try:
+                    existing_details = row['details']
+                    if isinstance(existing_details, str):
+                        existing_details = json.loads(existing_details)
+                    if isinstance(existing_details, str):
+                        existing_details = json.loads(existing_details)
+                    if isinstance(existing_details, dict) and existing_details.get('book_id') == book_id:
+                        conn_dup.close()
+                        return jsonify({'error': 'You already have a pending request for this book.'}), 409
+                except:
+                    continue
+            conn_dup.close()
+            
+            # 2. Check active loans and borrow limits
+            conn_lib = get_library_db()
+            cur_lib = conn_lib.cursor()
+            
+            # Check if already borrowed by this student
+            cur_lib.execute("SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'", 
+                            (session['student_id'], book_id))
+            if cur_lib.fetchone()['count'] > 0:
+                conn_lib.close()
+                return jsonify({'error': 'You already have an active loan for this book.'}), 409
+                
+            # Check max borrow limit (configurable, assuming 5 as default limit for students)
+            limit = int(os.getenv('MAX_BOOKS_PER_STUDENT', 5))
+            cur_lib.execute("SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'", 
+                            (session['student_id'],))
+            if cur_lib.fetchone()['count'] >= limit:
+                conn_lib.close()
+                return jsonify({'error': f'Borrow limit reached. You can only borrow up to {limit} books.'}), 403
+                
+            conn_lib.close()
+
 
     try:
         conn = get_portal_db()
@@ -3271,6 +3271,33 @@ def api_admin_approve_request(req_id):
         conn.close()
         return jsonify({'status': 'success', 'message': 'Registration approved and student added to library.'})
 
+    # For book requests, check effective availability before approving
+    if req['request_type'] == 'book_request':
+        try:
+            details = json.loads(req['details']) if req['details'] else {}
+            book_id = details.get('book_id')
+            if book_id:
+                conn_lib = get_library_db()
+                cursor_lib = conn_lib.cursor()
+                cursor_lib.execute("SELECT available_copies FROM books WHERE book_id = ?", (book_id,))
+                book_row = cursor_lib.fetchone()
+                
+                if book_row:
+                    actual_available = book_row['available_copies']
+                    
+                    # Search for approved but unfulfilled requests
+                    search_pattern = f'%"{book_id}"%'
+                    cursor.execute("SELECT COUNT(*) as count FROM requests WHERE request_type = 'book_request' AND status = 'approved' AND details LIKE ?", (search_pattern,))
+                    approved_count = cursor.fetchone()['count']
+                    
+                    if (actual_available - approved_count) <= 0:
+                        conn_lib.close()
+                        conn.close()
+                        return jsonify({'status': 'error', 'message': 'Cannot approve: All available copies are already issued or reserved.'}), 400
+                conn_lib.close()
+        except:
+            pass
+
     # Update status to approved
     cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
     
@@ -3426,6 +3453,34 @@ def api_admin_approve_request(req_id):
         footer_note = "Please return the book by the new date to avoid fines."
 
     elif req['request_type'] == 'profile_update':
+        try:
+            details_updated = json.loads(req['details']) if isinstance(req['details'], str) else req['details']
+            if details_updated:
+                conn_lib = get_library_db()
+                cursor_lib = conn_lib.cursor()
+                
+                valid_keys = ['name', 'email', 'phone', 'department', 'year']
+                set_clauses = []
+                params = []
+                for k in valid_keys:
+                    if k in details_updated and details_updated[k]:
+                        set_clauses.append(f"{k} = ?")
+                        params.append(str(details_updated[k]))
+                
+                if set_clauses:
+                    params.append(req['enrollment_no'])
+                    query = f"UPDATE students SET {', '.join(set_clauses)} WHERE enrollment_no = ?"
+                    cursor_lib.execute(query, params)
+                    conn_lib.commit()
+                    
+                    try:
+                        _push_to_cloud(query, params)
+                    except:
+                        pass
+                conn_lib.close()
+        except Exception as e:
+            print(f"Profile update applying error: {e}")
+
         email_subject = "✅ Profile Updated"
         header_title = "Update Successful"
         main_text = "Your profile update request has been processed and applied to your account."

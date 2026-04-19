@@ -948,11 +948,27 @@ class Database:
                 return False, f"Book not found (ID: {book_id})"
             book_id = real_book_id  # use stored key for all subsequent queries
 
+            # Calculate fine if overdue
+            fine_amount = 0
+            cursor.execute("SELECT due_date FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'", (enrollment_no, book_id))
+            record = cursor.fetchone()
+            if record and record[0]:
+                try:
+                    import os
+                    due_dt = datetime.strptime(record[0], '%Y-%m-%d')
+                    ret_dt = datetime.strptime(return_date, '%Y-%m-%d')
+                    days_late = (ret_dt - due_dt).days
+                    if days_late > 0:
+                        fine_per_day = float(os.getenv('FINE_PER_DAY', 5))
+                        fine_amount = int(days_late * fine_per_day)
+                except Exception as e:
+                    print(f"Error calculating fine during return: {e}")
+
             cursor.execute('''
                 UPDATE borrow_records 
-                SET return_date = ?, status = 'returned', updated_at=CURRENT_TIMESTAMP
+                SET return_date = ?, status = 'returned', fine = ?, updated_at=CURRENT_TIMESTAMP
                 WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
-            ''', (return_date, enrollment_no, book_id))
+            ''', (return_date, fine_amount, enrollment_no, book_id))
             
             if cursor.rowcount == 0:
                 return False, "No active borrowing record found"
