@@ -39,15 +39,20 @@ export default function Profile({ user }) {
       }
     };
     
-    // Load saved profile photo
-    const savedPhoto = localStorage.getItem('profilePhoto');
-    if (savedPhoto) setProfilePhoto(savedPhoto);
+    // Clear old localStorage photos if they exist (Migration to secure backend)
+    localStorage.removeItem('profilePhoto');
+    if (user?.enrollment_no) {
+        localStorage.removeItem(`profilePhoto_${user.enrollment_no}`);
+    }
+    
+    // Load photo from backend
+    setProfilePhoto(`/api/profile/photo?t=${new Date().getTime()}`);
     
     fetchPolicies();
     fetchDashboard();
-  }, []);
+  }, [user]);
 
-  const handlePhotoUpload = (e) => {
+  const handlePhotoUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -61,18 +66,22 @@ export default function Profile({ user }) {
       return;
     }
 
+    const formData = new FormData();
+    formData.append('photo', file);
+
     setUploadingPhoto(true);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const photoData = event.target.result;
-      setProfilePhoto(photoData);
-      // Save with user-specific key
-      if (user?.enrollment_no) {
-        localStorage.setItem(`profilePhoto_${user.enrollment_no}`, photoData);
-      }
+    try {
+      await axios.post('/api/profile/photo', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      // Force image reload by appending a new timestamp
+      setProfilePhoto(`/api/profile/photo?t=${new Date().getTime()}`);
+      toast.success('Profile photo updated successfully');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to upload photo');
+    } finally {
       setUploadingPhoto(false);
-    };
-    reader.readAsDataURL(file);
+    }
   };
 
   // Normalize year for display
@@ -145,6 +154,10 @@ export default function Profile({ user }) {
                             src={profilePhoto || `https://ui-avatars.com/api/?name=${encodeURIComponent(profile.name)}&background=random&color=fff&size=256`}
                             alt={profile.name}
                             className="w-full h-full object-cover"
+                            onError={(e) => {
+                                e.target.onerror = null; // prevent infinite loop
+                                e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(profile.name)}&background=0F3460&color=fff&size=256`;
+                            }}
                         />
                         <button
                             onClick={() => fileInputRef.current?.click()}

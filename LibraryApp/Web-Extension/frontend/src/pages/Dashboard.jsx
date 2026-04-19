@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
-import { Book, AlertCircle, Clock, CheckCircle2, Megaphone, TrendingUp, RefreshCw, IndianRupee } from 'lucide-react';
+import { Book, AlertCircle, Clock, CheckCircle2, Megaphone, TrendingUp, RefreshCw, IndianRupee, Bookmark, History, PieChart } from 'lucide-react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Skeleton from '../components/ui/Skeleton';
@@ -26,13 +26,10 @@ export default function Dashboard({ user }) {
   const [profilePhoto, setProfilePhoto] = useState(null);
   const [renewingBookId, setRenewingBookId] = useState(null);
 
-  // Load profile photo from localStorage (user-specific)
+  // Load profile photo directly from backend endpoint
   useEffect(() => {
     if (user?.enrollment_no) {
-      const savedPhoto = localStorage.getItem(`profilePhoto_${user.enrollment_no}`);
-      if (savedPhoto) {
-        setProfilePhoto(savedPhoto);
-      }
+      setProfilePhoto(`/api/profile/photo?_t=${new Date().getTime()}`);
     }
   }, [user]);
 
@@ -151,7 +148,15 @@ export default function Dashboard({ user }) {
                 </div>
                 <div className="flex items-center gap-5 relative z-10 w-full mb-6">
                     <div className="shrink-0 relative">
-                        <img src={displayUser.avatar} alt="Profile" className="w-16 h-16 rounded-full border-2 border-white/50 object-cover shadow-lg" />
+                        <img 
+                          src={displayUser.avatar} 
+                          alt="Profile" 
+                          className="w-16 h-16 rounded-full border-2 border-white/50 object-cover shadow-lg" 
+                          onError={(e) => {
+                              e.target.onerror = null;
+                              e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent((user?.name || 'Student').split(' ').map(n=>n[0]).join('').substring(0,2))}&background=0F3460&color=fff&size=128&bold=true`;
+                          }}
+                        />
                     </div>
                     <div>
                         <p className="text-blue-100 text-xs font-medium tracking-wider uppercase mb-1">Student Portal</p>
@@ -209,7 +214,7 @@ export default function Dashboard({ user }) {
         </div>
 
         {/* 2. Secondary: Stats Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
               <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
                   <div>
                       <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Borrowed</p>
@@ -248,22 +253,87 @@ export default function Dashboard({ user }) {
                       <IndianRupee size={18} />
                   </div>
               </Card>
+              <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+                  <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Wishlist</p>
+                      <p className={`text-xl font-black mt-0.5 ${(data.summary?.wishlist_count || 0) > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400 dark:text-slate-600'}`}>
+                          {data.summary?.wishlist_count ?? 0}
+                      </p>
+                      <p className="text-[10px] text-slate-400 mt-1">{(data.summary?.wishlist_count || 0) > 0 ? 'Books waiting' : 'Wishlist is empty'}</p>
+                  </div>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${(data.summary?.wishlist_count || 0) > 0 ? 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-500 dark:text-indigo-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
+                      <Bookmark size={18} />
+                  </div>
+              </Card>
+              <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+                  <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">Total Fines</p>
+                      <p className={`text-xl font-black mt-0.5 ${(data.summary?.total_fine_ever || 0) > 0 ? 'text-slate-800 dark:text-white' : 'text-slate-400 dark:text-slate-600'}`}>
+                          ₹{data.summary?.total_fine_ever ?? 0}
+                      </p>
+                      <p className="text-[10px] text-slate-400 mt-1">Cumulative history</p>
+                  </div>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center text-slate-500 bg-slate-100 dark:bg-slate-800 dark:text-slate-400`}>
+                      <History size={18} />
+                  </div>
+              </Card>
         </div>
 
-        {/* 3. Bottom Row: Broadcast Notices & Recent Requests */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        {/* 3. Bottom Row */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            {/* Reading Habits */}
+            <div className="space-y-4">
+               <h3 className="text-lg font-heading font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                  <PieChart className="w-5 h-5 text-purple-500" />
+                  Reading Habits
+               </h3>
+               <Card className="p-5 flex flex-col justify-center h-[calc(100%-2rem)]">
+                 {!data.analytics?.stats?.categories || Object.keys(data.analytics.stats.categories).length === 0 ? (
+                    <div className="text-center text-slate-400 dark:text-slate-500 my-auto py-6">
+                      <TrendingUp className="w-8 h-8 opacity-50 mx-auto mb-2" />
+                      <p className="text-sm font-medium">No reading data yet.</p>
+                    </div>
+                 ) : (
+                    <div className="space-y-4 w-full">
+                      {Object.entries(data.analytics.stats.categories)
+                        .sort(([,a], [,b]) => b - a)
+                        .slice(0, 4)
+                        .map(([category, count]) => {
+                          const total = data.analytics.stats.total_books || Object.values(data.analytics.stats.categories).reduce((a,b)=>a+b, 0) || 1;
+                          const pct = Math.round((count / total) * 100);
+                          return (
+                            <div key={category}>
+                              <div className="flex justify-between text-xs mb-1 font-bold">
+                                <span className="text-slate-700 dark:text-slate-300 truncate pr-2">{category}</span>
+                                <span className="text-slate-500 dark:text-slate-400 shrink-0">{pct}% ({count})</span>
+                              </div>
+                              <div className="h-2 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                <div 
+                                  className="h-full bg-purple-500 dark:bg-purple-400 rounded-full" 
+                                  style={{ width: `${pct}%` }} 
+                                />
+                              </div>
+                            </div>
+                          );
+                      })}
+                    </div>
+                 )}
+               </Card>
+            </div>
+
             {/* Broadcast Notices */}
             {data.notices && data.notices.length > 0 && (
-               <div className="space-y-4">
+               <div className="space-y-4 lg:col-span-1">
                  <h3 className="text-lg font-heading font-bold text-slate-800 dark:text-white flex items-center gap-2">
                     <Megaphone className="w-5 h-5 text-amber-500" />
                     Announcements
                  </h3>
                  <div className="grid gap-3">
                    {data.notices.slice(0,2).map((notice) => (
-                     <div key={notice.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-xl shadow-sm border-l-4 border-l-amber-400">
+                     <div key={notice.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-xl shadow-sm border-l-4 border-l-amber-400 h-full flex flex-col">
                          <h4 className="font-bold text-slate-800 dark:text-white text-sm mb-1">{notice.title}</h4>
-                         <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed mb-2 line-clamp-2">{notice.content}</p>
+                         <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed mb-2 line-clamp-2 flex-grow">{notice.content}</p>
                          <div className="text-[10px] text-slate-400 font-medium">Posted on {formatDate(notice.date)}</div>
                      </div>
                    ))}
@@ -272,7 +342,7 @@ export default function Dashboard({ user }) {
             )}
 
             {/* Recent Requests */}
-            <div className="space-y-4">
+            <div className="space-y-4 lg:col-span-1">
                <h3 className="text-lg font-heading font-bold text-slate-800 dark:text-white flex items-center gap-2">
                   <RefreshCw className="w-5 h-5 text-indigo-500" />
                   Recent Requests
@@ -341,8 +411,8 @@ function DashboardSkeleton() {
       </div>
 
       {/* 2. Top Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[1, 2, 3, 4].map((i) => (
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        {[1, 2, 3, 4, 5, 6].map((i) => (
           <div key={i} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
             <div className="flex items-center gap-3">
               <Skeleton className="w-10 h-10 rounded-full" />
@@ -408,12 +478,23 @@ function DashboardSkeleton() {
       </div>
 
       {/* Bottom Row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="space-y-4">
+          <Skeleton className="h-6 w-40 rounded-lg" />
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl space-y-4">
+             {[1,2,3].map(i => (
+                <div key={i} className="space-y-2">
+                   <div className="flex justify-between"><Skeleton className="h-3 w-20"/><Skeleton className="h-3 w-10"/></div>
+                   <Skeleton className="h-2 w-full rounded-full" />
+                </div>
+             ))}
+          </div>
+        </div>
+        <div className="space-y-4 lg:col-span-1">
           <Skeleton className="h-6 w-40 rounded-lg" />
           <div className="space-y-3">
             {[1, 2].map((i) => (
-              <div key={i} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-xl shadow-sm border-l-4 border-l-slate-200 dark:border-l-slate-800 space-y-2">
+              <div key={i} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-xl shadow-sm border-l-4 border-l-slate-200 dark:border-l-slate-800 space-y-2 h-[100px]">
                 <Skeleton className="h-4 w-1/2 rounded" />
                 <Skeleton className="h-3 w-full rounded" />
                 <Skeleton className="h-3 w-2/3 rounded" />
@@ -421,18 +502,17 @@ function DashboardSkeleton() {
             ))}
           </div>
         </div>
-        <div className="space-y-4">
+        <div className="space-y-4 lg:col-span-1">
           <Skeleton className="h-6 w-40 rounded-lg" />
           <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
             {[1, 2, 3].map((i) => (
-              <div key={i} className="p-3.5 flex items-center justify-between gap-3">
+              <div key={i} className="p-3.5 flex items-center justify-between gap-3 h-[60px]">
                 <div className="space-y-2 flex-1">
                   <Skeleton className="h-4 w-24 rounded" />
                   <Skeleton className="h-3 w-32 rounded" />
                 </div>
-                <div className="space-y-2 items-end flex flex-col">
+                <div className="space-y-2 flex flex-col items-end">
                   <Skeleton className="h-4 w-16 rounded-full" />
-                  <Skeleton className="h-3 w-12 rounded" />
                 </div>
               </div>
             ))}

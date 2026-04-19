@@ -62,6 +62,8 @@ else:
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads', 'study_materials')
 REGISTRATION_PHOTO_FOLDER = os.path.join(BASE_DIR, 'uploads', 'registration_photos')
+PROFILE_PHOTO_FOLDER = os.path.join(BASE_DIR, 'uploads', 'profile_photos')
+os.makedirs(PROFILE_PHOTO_FOLDER, exist_ok=True)
 ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'jpg', 'jpeg', 'png', 'zip', 'rar'}
 ALLOWED_PHOTO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 MAX_PHOTO_BYTES = 50 * 1024  # 50KB
@@ -1647,11 +1649,57 @@ def api_update_settings():
     
     return jsonify({'status': 'success', 'message': 'Settings updated successfully'})
 
-# --- Broadcast APIs ---
+@app.route('/api/profile/photo', methods=['GET', 'POST', 'DELETE'])
+def api_profile_photo():
+    """Manage student profile photos."""
+    if 'student_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
 
-@app.route('/api/notices', methods=['GET'])
-def api_public_notices():
-    """Get active notices for students"""
+    enrollment = str(session['student_id']).strip()
+
+    if request.method == 'GET':
+        for ext in ['.jpg', '.jpeg', '.png']:
+            path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{ext}")
+            if os.path.exists(path):
+                return send_file(path)
+        return jsonify({'error': 'No photo found'}), 404
+
+    if request.method == 'POST':
+        if 'photo' not in request.files:
+            return jsonify({'error': 'No photo provided'}), 400
+
+        photo = request.files['photo']
+        if photo.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+
+        ext = os.path.splitext(photo.filename)[1].lower()
+        if ext not in ['.jpg', '.jpeg', '.png']:
+            return jsonify({'error': 'Invalid file type. Only JPG and PNG are allowed.'}), 400
+
+        # Remove old photos
+        for old_ext in ['.jpg', '.jpeg', '.png']:
+            old_path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{old_ext}")
+            if os.path.exists(old_path):
+                try: os.remove(old_path)
+                except: pass
+
+        # Save new photo
+        save_path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{ext}")
+        photo.save(save_path)
+        
+        return jsonify({'status': 'success', 'message': 'Profile photo updated'})
+        
+    if request.method == 'DELETE':
+        deleted = False
+        for old_ext in ['.jpg', '.jpeg', '.png']:
+            old_path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{old_ext}")
+            if os.path.exists(old_path):
+                try: 
+                    os.remove(old_path)
+                    deleted = True
+                except: pass
+        return jsonify({'status': 'success', 'message': 'Profile photo removed'}) if deleted else jsonify({'error': 'No photo found'}), 404
+
     conn = get_portal_db()
     cursor = conn.cursor()
     cursor.execute("SELECT id, title, message, created_at FROM notices WHERE active = 1 ORDER BY created_at DESC")
