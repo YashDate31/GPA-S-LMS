@@ -296,25 +296,31 @@ export default function Catalogue() {
                                 {/* Spine/Pages Effect */}
                                 <div className="absolute top-1 right-1 w-full h-full bg-slate-200 rounded-r-sm shadow-md border-l border-slate-300"></div>
                                 <div className="absolute top-2 right-2 w-full h-full bg-slate-100 rounded-r-sm shadow-sm border-l border-slate-300"></div>
-                                
+
                                 {/* Main Cover */}
-                                <div className={`absolute inset-0 rounded-r-md shadow-xl group-hover:shadow-2xl transition-all bg-gradient-to-br ${getCoverStyle(book.category)} flex flex-col p-4 text-white overflow-hidden ${book.available_copies === 0 ? 'grayscale opacity-90' : ''}`}>
-                                    <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-colors"></div>
-                                    <div className="absolute -right-4 -bottom-4 text-white/10 opacity-50">
-                                        <Book size={120} />
-                                    </div>
+                                <div className={`absolute inset-0 rounded-r-md shadow-xl group-hover:shadow-2xl transition-all bg-gradient-to-br flex flex-col pt-0 pl-0 pr-0 pb-0 text-white overflow-hidden ${book.available_copies === 0 ? 'grayscale opacity-90' : ''} ${(!book.cover_url || book.cover_url === 'NOT_FOUND') ? getCoverStyle(book.category) : 'bg-slate-200'}`}>
+                                    {book.cover_url && book.cover_url !== 'NOT_FOUND' ? (
+                                        <img src={book.cover_url} alt={book.title} className="w-full h-full object-cover object-center rounded-r-md" loading="lazy" onError={(e) => { e.target.style.display='none'; e.target.nextSibling.style.display='flex'; e.target.parentElement.className = e.target.parentElement.className.replace('bg-slate-200', '') + ' ' + getCoverStyle(book.category); }} />
+                                    ) : null}
                                     
-                                    <div className="relative z-10 flex flex-col h-full">
-                                        <div className="text-[10px] font-bold tracking-widest uppercase opacity-75 border-b border-white/20 pb-2 mb-2">
-                                            {book.category}
+                                    <div className={`w-full h-full flex flex-col p-4 relative ${book.cover_url && book.cover_url !== 'NOT_FOUND' ? 'hidden' : ''}`}>
+                                        <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-colors"></div>
+                                        <div className="absolute -right-4 -bottom-4 text-white/10 opacity-50">
+                                            <Book size={120} />
                                         </div>
-                                        <h3 className="font-serif font-bold text-lg leading-tight line-clamp-3 mb-1">
-                                            {book.title}
-                                        </h3>
-                                        <p className="text-xs font-medium opacity-90 italic">
-                                            {book.author}
-                                        </p>
-                                        
+
+                                        <div className="relative z-10 flex flex-col h-full">
+                                            <div className="text-[10px] font-bold tracking-widest uppercase opacity-75 border-b border-white/20 pb-2 mb-2">
+                                                {book.category}
+                                            </div>
+                                            <h3 className="font-serif font-bold text-lg leading-tight line-clamp-3 mb-1">
+                                                {book.title}
+                                            </h3>
+                                            <p className="text-xs font-medium opacity-90 italic">
+                                                {book.author}
+                                            </p>
+                                        </div>
+
                                         <div className="mt-auto pt-4 flex items-center justify-between">
                                             {/* Department Badge */}
                                             <span className="text-[9px] bg-white/20 px-1.5 py-0.5 rounded backdrop-blur-sm">
