@@ -5,8 +5,10 @@ import { Camera, Mail, GraduationCap, Building2, Calendar, Book, Clock, RefreshC
 import { SkeletonCard } from '../components/ui/Skeleton';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import { motion } from 'framer-motion';
+import { useToast } from '../context/ToastContext';
 
 export default function Profile({ user }) {
+  const toast = useToast();
   const [policies, setPolicies] = useState(null);
   const [activeLoansCount, setActiveLoansCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -50,12 +52,12 @@ export default function Profile({ user }) {
     if (!file) return;
 
     if (file.size > 5 * 1024 * 1024) {
-      alert('File size must be less than 5MB');
+      toast.error('File size must be less than 5MB');
       return;
     }
 
     if (!file.type.startsWith('image/')) {
-      alert('Please select an image file');
+      toast.error('Please select an image file');
       return;
     }
 
@@ -125,8 +127,8 @@ export default function Profile({ user }) {
           
           {/* Main ID Card */}
           <div className="relative group perspective-1000">
-             <div className="absolute inset-0 bg-blue-600 rounded-3xl blur-xl opacity-20 group-hover:opacity-30 transition-opacity duration-500"></div>
-             <div className="relative bg-gradient-to-br from-blue-600 to-indigo-700 rounded-3xl p-8 text-white shadow-2xl overflow-hidden flex flex-col items-center text-center">
+             <div className="absolute inset-0 bg-primary rounded-3xl blur-xl opacity-20 group-hover:opacity-30 transition-opacity duration-500"></div>
+             <div className="relative bg-gradient-to-br from-primary to-indigo-900 rounded-3xl p-8 text-white shadow-2xl overflow-hidden flex flex-col items-center text-center">
                 
                 {/* Decorative Pattern */}
                 <div className="absolute top-0 left-0 w-full h-full opacity-10">
@@ -234,11 +236,11 @@ export default function Profile({ user }) {
                 <div className="md:col-span-3 mb-2">
                     <div className="flex justify-between items-end mb-2">
                         <span className="text-sm font-bold text-slate-700 dark:text-slate-300">Books Borrowed</span>
-                        <span className="text-sm font-bold text-blue-600 dark:text-blue-400">{activeLoansCount} / {policies?.max_books || 0}</span>
+                        <span className="text-sm font-bold text-primary dark:text-blue-400">{activeLoansCount} / {policies?.max_books || 0}</span>
                     </div>
                     <div className="h-2.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                         <div 
-                            className="h-full bg-blue-600 dark:bg-blue-500 rounded-full transition-all duration-1000" 
+                            className="h-full bg-primary dark:bg-blue-500 rounded-full transition-all duration-1000" 
                             style={{ width: `${Math.min(100, ((activeLoansCount / Math.max(1, policies?.max_books || 1)) * 100))}%` }}
                         />
                     </div>

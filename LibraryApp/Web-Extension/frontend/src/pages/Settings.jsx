@@ -3,8 +3,10 @@ import axios from 'axios';
 import DangerValidationModal from '../components/DangerValidationModal';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Settings as SettingsIcon, Bell, Shield, Moon, Trash2, Key, Mail, Save, X, Loader2 } from 'lucide-react';
+import { useToast } from '../context/ToastContext';
 
 export default function Settings({ user, setUser }) {
+  const toast = useToast();
   // Local state for settings form
   const [email, setEmail] = useState('');
   const [libraryAlerts, setLibraryAlerts] = useState(false);
@@ -103,16 +105,16 @@ export default function Settings({ user, setUser }) {
         if (data.status === 'success') {
             // Optimistic update of parent state if possible, or force reload
             // Ideally notify user and update 'user' prop context
-            alert("Settings saved successfully!");
+            toast.success("Settings saved successfully!");
             
             // Trigger a silent reload of user data if possible, or just reload page
             window.location.reload(); 
         } else {
-           alert(data.message || "Failed to save settings.");
+           toast.error(data.message || "Failed to save settings.");
         }
     } catch (e) {
         console.error(e);
-        alert("Failed to save settings. Please try again.");
+        toast.error("Failed to save settings. Please try again.");
     } finally {
         setIsSaving(false);
     }
@@ -164,7 +166,7 @@ export default function Settings({ user, setUser }) {
                         <button 
                             onClick={handleSave} 
                             disabled={isSaving}
-                            className="absolute right-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors shadow-sm"
+                            className="absolute right-2 px-3 py-1.5 bg-primary hover:bg-opacity-90 text-white rounded-lg text-xs font-bold transition-colors shadow-sm"
                         >
                             {isSaving ? 'Saving' : 'Save Email'}
                         </button>
@@ -217,7 +219,7 @@ export default function Settings({ user, setUser }) {
                              <button 
                                  onClick={handleChangePassword}
                                  disabled={isSavingPassword}
-                                 className="px-4 py-2 bg-slate-900 dark:bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-slate-800 dark:hover:bg-blue-500 transition-colors"
+                                 className="px-4 py-2 bg-slate-900 dark:bg-primary text-white text-xs font-bold rounded-lg hover:bg-slate-800 dark:hover:bg-opacity-90 transition-colors"
                              >
                                  {isSavingPassword ? 'Saving...' : 'Update'}
                              </button>
@@ -297,7 +299,7 @@ export default function Settings({ user, setUser }) {
                 initial={{ y: 100, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ y: 100, opacity: 0 }}
-                className="fixed bottom-24 md:bottom-8 left-4 right-4 md:left-1/2 md:right-auto md:-translate-x-1/2 bg-slate-900/95 dark:bg-blue-600/95 text-white p-2 pl-4 md:pl-6 pr-2 rounded-full shadow-2xl flex items-center gap-2 md:gap-6 z-[200] border border-slate-700/50 dark:border-blue-500/50 backdrop-blur-md justify-between md:justify-start"
+                className="fixed bottom-24 md:bottom-8 left-4 right-4 md:left-1/2 md:right-auto md:-translate-x-1/2 bg-slate-900/95 dark:bg-primary/95 text-white p-2 pl-4 md:pl-6 pr-2 rounded-full shadow-2xl flex items-center gap-2 md:gap-6 z-[200] border border-slate-700/50 dark:border-primary/50 backdrop-blur-md justify-between md:justify-start"
             >
                 <span className="font-bold text-sm text-slate-200 whitespace-nowrap">Unsaved changes</span>
                 <div className="flex items-center gap-2">
@@ -310,7 +312,7 @@ export default function Settings({ user, setUser }) {
                     </button>
                     <button 
                         onClick={handleSave}
-                        className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-full text-sm font-bold shadow-lg shadow-blue-900/50 transition-all active:scale-95 flex items-center gap-2"
+                        className="px-6 py-2 bg-primary hover:bg-opacity-90 text-white rounded-full text-sm font-bold shadow-lg shadow-primary/50 transition-all active:scale-95 flex items-center gap-2"
                         disabled={isSaving}
                     >
                         {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
@@ -325,7 +327,7 @@ export default function Settings({ user, setUser }) {
         isOpen={isDeleteModalOpen} 
         onClose={() => setIsDeleteModalOpen(false)}
         user={user}
-        onSuccess={() => alert("Deletion request sent.")}
+        onSuccess={() => toast.success("Deletion request sent.")}
       />
     </div>
   );
@@ -344,7 +346,7 @@ const Panel = ({ title, icon: Icon, children, delay }) => (
           <Icon size={120} className="dark:text-white" />
       </div>
       <div className="flex items-center gap-3 mb-8 relative z-10">
-          <div className="p-3 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-2xl shadow-sm transition-colors">
+          <div className="p-3 bg-primary/10 dark:bg-primary/20 text-primary dark:text-blue-400 rounded-2xl shadow-sm transition-colors">
               <Icon size={24} />
           </div>
           <h2 className="text-xl font-bold text-slate-900 dark:text-white transition-colors">{title}</h2>
@@ -364,7 +366,7 @@ function Switch({ checked, onChange }) {
       onClick={() => onChange(!checked)}
       className={`
         w-14 h-8 rounded-full relative transition-colors duration-300 ease-spring focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2
-        ${checked ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'}
+        ${checked ? 'bg-primary' : 'bg-slate-200 dark:bg-slate-700'}
       `}
     >
       <motion.div
