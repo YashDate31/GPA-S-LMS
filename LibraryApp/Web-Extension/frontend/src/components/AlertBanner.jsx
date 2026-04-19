@@ -35,8 +35,8 @@ export default function AlertBanner() {
   };
 
   return (
-    <div className={`text-white px-4 py-3 shadow-md relative z-50 animate-slide-in ${alert.type === 'security' ? 'bg-amber-500' : 'bg-red-600'}`}>
-      <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+    <div className={`text-white px-4 md:px-6 py-4 rounded-xl shadow-sm relative animate-slide-in ${alert.type === 'security' ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-red-600 to-rose-600'}`}>
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         
         <div className="flex items-center gap-3">
           <div className="bg-white/20 p-1.5 rounded-full shrink-0 animate-pulse">
@@ -58,10 +58,10 @@ export default function AlertBanner() {
           </div>
         </div>
 
-        <div className="flex items-center gap-4 shrink-0">
+        <div className="flex items-center gap-4 shrink-0 w-full sm:w-auto justify-end sm:justify-start mt-2 sm:mt-0">
           <Link 
             to="/settings" 
-            className="text-white text-sm font-semibold hover:underline flex items-center gap-1 group bg-white/10 px-3 py-1.5 rounded-lg hover:bg-white/20 transition"
+            className="text-white text-sm font-semibold hover:underline flex items-center gap-1 group bg-white/20 px-4 py-1.5 rounded-lg hover:bg-white/30 transition shadow-sm"
           >
             Fix Now <ChevronRight size={16} className="group-hover:translate-x-0.5 transition-transform" />
           </Link>

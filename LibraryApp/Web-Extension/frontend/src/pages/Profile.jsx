@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
-import { Camera, Mail, GraduationCap, Building2, Calendar, Book, Clock, RefreshCw, Key, ShieldCheck, CheckCircle2, Shield } from 'lucide-react';
+import { Camera, Mail, GraduationCap, Building2, Calendar, Book, Clock, RefreshCw, Key, ShieldCheck, CheckCircle2, Shield, AlertCircle } from 'lucide-react';
 import { SkeletonCard } from '../components/ui/Skeleton';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import { motion } from 'framer-motion';
 
 export default function Profile({ user }) {
   const [policies, setPolicies] = useState(null);
+  const [activeLoansCount, setActiveLoansCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [profilePhoto, setProfilePhoto] = useState(null);
@@ -26,12 +27,22 @@ export default function Profile({ user }) {
         setLoading(false);
       }
     };
+
+    const fetchDashboard = async () => {
+      try {
+        const { data } = await axios.get('/api/dashboard');
+        setActiveLoansCount(data.summary?.borrowed_count || data.borrows?.length || 0);
+      } catch (e) {
+        console.error("Failed to fetch dashboard stats", e);
+      }
+    };
     
     // Load saved profile photo
     const savedPhoto = localStorage.getItem('profilePhoto');
     if (savedPhoto) setProfilePhoto(savedPhoto);
     
     fetchPolicies();
+    fetchDashboard();
   }, []);
 
   const handlePhotoUpload = (e) => {
@@ -183,6 +194,23 @@ export default function Profile({ user }) {
         
         {/* Right Column: Info Grids */}
         <div className="lg:col-span-2 space-y-8">
+
+          {/* Missing Info Warnings */}
+          {(!profile.email || profile.email === 'N/A' || profile.department === 'General' || profile.year === 'N/A') && (
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-2xl p-5 flex items-start gap-4">
+              <AlertCircle className="text-amber-600 dark:text-amber-500 shrink-0 mt-0.5" size={24} />
+              <div>
+                <h4 className="text-base font-bold text-amber-900 dark:text-amber-400">Complete Your Profile</h4>
+                <p className="text-sm text-amber-800/80 dark:text-amber-200/70 mt-1 mb-3">
+                  {(!profile.email || profile.email === 'N/A') ? "Without an email address, you will not receive loan reminders, overdue notices, or request updates. " : ""}
+                  {(profile.department === 'General' || profile.year === 'N/A') ? "Please provide your academic details for properly tailored library services." : ""}
+                </p>
+                <Link to="/settings" className="inline-flex items-center justify-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold rounded-lg transition-colors">
+                  Update in Settings
+                </Link>
+              </div>
+            </div>
+          )}
           
           {/* Academic Info */}
           <section>
@@ -202,36 +230,22 @@ export default function Profile({ user }) {
             <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2 transition-colors">
                 <Book className="text-purple-500" /> Borrowing Privileges
             </h3>
-            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-800 p-6 grid grid-cols-1 md:grid-cols-3 gap-4 transition-colors">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-800 p-6 grid grid-cols-1 md:grid-cols-3 gap-6 transition-colors">
+                <div className="md:col-span-3 mb-2">
+                    <div className="flex justify-between items-end mb-2">
+                        <span className="text-sm font-bold text-slate-700 dark:text-slate-300">Books Borrowed</span>
+                        <span className="text-sm font-bold text-blue-600 dark:text-blue-400">{activeLoansCount} / {policies?.max_books || 0}</span>
+                    </div>
+                    <div className="h-2.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                        <div 
+                            className="h-full bg-blue-600 dark:bg-blue-500 rounded-full transition-all duration-1000" 
+                            style={{ width: `${Math.min(100, ((activeLoansCount / Math.max(1, policies?.max_books || 1)) * 100))}%` }}
+                        />
+                    </div>
+                </div>
                 <InfoRow icon={Book} label="Max Books" value={`${policies?.max_books || 0} Books`} loading={loading} />
                 <InfoRow icon={Clock} label="Loan Duration" value={`${policies?.loan_duration || 0} Days`} loading={loading} />
                 <InfoRow icon={RefreshCw} label="Renewals" value={`${policies?.renewal_limit || 0} Times`} loading={loading} />
-            </div>
-          </section>
-
-          {/* Account Settings */}
-          <section>
-             <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2 transition-colors">
-                <Key className="text-slate-500 dark:text-slate-400" /> Security
-            </h3>
-            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-800 p-6 flex flex-col md:flex-row items-center justify-between gap-4 transition-colors">
-                 <div className="flex items-center gap-4">
-                     <div className="bg-orange-50 dark:bg-orange-900/20 p-3 rounded-full text-orange-600 dark:text-orange-400">
-                         <Key size={24} />
-                     </div>
-                     <div>
-                         <h4 className="font-bold text-slate-900 dark:text-white transition-colors">Password</h4>
-                         <p className="text-sm text-slate-500 dark:text-slate-400 transition-colors">
-                             Last changed: {loading ? 'Loading...' : policies?.password_last_changed || 'Unknown'}
-                         </p>
-                     </div>
-                 </div>
-                 <Link 
-                   to="/settings" 
-                   className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-slate-200 dark:shadow-blue-900/30"
-                 >
-                   Change Password
-                 </Link>
             </div>
           </section>
           
