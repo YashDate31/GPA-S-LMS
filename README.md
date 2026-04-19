@@ -2,7 +2,7 @@
 
 <img src="LibraryApp/logo.png" alt="GPA Library Logo" width="96" height="96" />
 
-# GPA Student Library Management System
+# GPA Library Management System
 
 **Government Polytechnic Awasari (Khurd), Pune**
 
