@@ -9,8 +9,10 @@ import ErrorMessage from '../components/ui/ErrorMessage';
 import EmptyState from '../components/ui/EmptyState';
 import BookLoanCard from '../components/BookLoanCard';
 import AlertBanner from '../components/AlertBanner';
+import { useToast } from '../context/ToastContext';
 
 export default function Dashboard({ user }) {
+  const toast = useToast();
   const navigate = useNavigate();
   const [data, setData] = useState({ 
     borrows: [], 
@@ -84,11 +86,11 @@ export default function Dashboard({ user }) {
         type: 'renewal',
         details: JSON.stringify({ book_id: book.book_id, accession_no: book.accession_no || book.book_id, title: book.title })
       });
-      alert('Renewal request sent to librarian for approval.');
+      toast.success('Renewal request sent to librarian for approval.');
       fetchData();
     } catch (e) {
       const msg = e.response?.data?.error || e.response?.data?.message || 'Failed to submit renewal request';
-      alert(msg);
+      toast.error(msg);
     } finally {
       setRenewingBookId(null);
     }
@@ -141,7 +143,7 @@ export default function Dashboard({ user }) {
         {/* Z-Pattern: 1. Header & Most Urgent Action */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
              {/* Profile Minimal Card */}
-             <Card className="relative h-full bg-gradient-to-br from-blue-600 to-indigo-700 text-white border-none shadow-xl overflow-hidden flex flex-col justify-center p-6">
+             <Card className="relative h-full bg-gradient-to-br from-primary to-indigo-900 text-white border-none shadow-xl overflow-hidden flex flex-col justify-center p-6">
                 <div className="absolute top-0 right-0 p-4 opacity-10">
                     <svg width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
                         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
@@ -177,7 +179,7 @@ export default function Dashboard({ user }) {
             <div className="h-full flex flex-col">
               <h3 className="text-lg font-heading font-bold text-slate-800 dark:text-white mb-3 px-1 flex items-center justify-between">
                 <span>Active Loans</span>
-                <button className="text-sm text-blue-600 hover:underline font-semibold" onClick={() => navigate('/my-books')}>View History ➜</button>
+                <button className="text-sm text-primary hover:underline font-semibold" onClick={() => navigate('/my-books')}>View History ➜</button>
               </h3>
               {activeBorrows.length === 0 ? (
                  <Card className="flex-1 flex flex-col items-center justify-center p-6 text-center border-dashed border-2 bg-slate-50 dark:bg-slate-900/50 shadow-none">
@@ -214,7 +216,7 @@ export default function Dashboard({ user }) {
                       <p className="text-xl font-black text-slate-800 dark:text-white mt-0.5">{data.summary?.borrowed_count ?? activeBorrows.length}</p>
                       <p className="text-[10px] text-slate-400 mt-1">{activeBorrows.length === 0 ? 'No current loans' : `Active library loans`}</p>
                   </div>
-                  <div className="w-10 h-10 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full flex items-center justify-center"><Book size={18} /></div>
+                  <div className="w-10 h-10 bg-primary/10 dark:bg-primary/20 text-primary dark:text-blue-400 rounded-full flex items-center justify-center"><Book size={18} /></div>
               </Card>
               <Card className="p-4 flex items-center justify-between hover:shadow-md transition-shadow">
                   <div>

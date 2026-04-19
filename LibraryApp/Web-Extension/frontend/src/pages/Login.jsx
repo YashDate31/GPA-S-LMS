@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { BookOpen, Key } from 'lucide-react';
+import { useToast } from '../context/ToastContext';
 
 // Custom Input Component to match the design (Green focus)
 const CustomInput = ({ label, type, value, onChange, placeholder, required = true }) => (
@@ -11,7 +12,7 @@ const CustomInput = ({ label, type, value, onChange, placeholder, required = tru
         type={type} 
         value={value}
         onChange={onChange}
-        className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 outline-none transition-all bg-white text-slate-800 placeholder:text-slate-400"
+        className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all bg-white text-slate-800 placeholder:text-slate-400"
         placeholder={placeholder}
         required={required}
       />
@@ -19,6 +20,7 @@ const CustomInput = ({ label, type, value, onChange, placeholder, required = tru
 );
 
 export default function Login({ setUser }) {
+  const toast = useToast();
   const navigate = useNavigate();
   const [enrollment, setEnrollment] = useState('');
   const [password, setPassword] = useState('');
@@ -71,7 +73,7 @@ export default function Login({ setUser }) {
       try {
           const { data } = await axios.post('/api/public/forgot-password', { enrollment_no: enrollment });
           if(data.status === 'success') {
-              alert('Request Sent! The librarian will review your request.');
+              toast.success('Request Sent! The librarian will review your request.');
               setView('login');
               setPassword('');
           } else {
@@ -146,7 +148,7 @@ export default function Login({ setUser }) {
             </div>
 
             {/* Divider */}
-            <div className="w-16 h-1 bg-blue-100 rounded-full mb-8"></div>
+            <div className="w-16 h-1 bg-primary/20 rounded-full mb-8"></div>
            
            {view !== 'forgot' && (
              <>
@@ -187,7 +189,7 @@ export default function Login({ setUser }) {
             <button 
               type="submit" 
               disabled={loading}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-600/20 active:scale-[0.98] disabled:opacity-70 disabled:scale-100 mt-2"
+              className="w-full py-3.5 bg-primary hover:bg-opacity-90 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary/20 active:scale-[0.98] disabled:opacity-70 disabled:scale-100 mt-2"
             >
               {loading ? 'Sending Request...' : 'Send Request'}
             </button>
@@ -221,7 +223,7 @@ export default function Login({ setUser }) {
             <button 
               type="submit" 
               disabled={loading}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-600/20 active:scale-[0.98] disabled:opacity-70 disabled:scale-100 mt-2"
+              className="w-full py-3.5 bg-primary hover:bg-opacity-90 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary/20 active:scale-[0.98] disabled:opacity-70 disabled:scale-100 mt-2"
             >
               {loading ? 'Verifying...' : 'Login'}
             </button>
@@ -230,7 +232,7 @@ export default function Login({ setUser }) {
               <button 
                 type="button"
                 onClick={() => setView('forgot')}
-                className="text-sm text-blue-600 font-medium hover:underline"
+                className="text-sm text-primary font-medium hover:underline"
               >
                 Forgot Password?
               </button>
@@ -243,7 +245,7 @@ export default function Login({ setUser }) {
                 className="text-sm font-medium group"
               >
                 <span className="text-slate-600">New student? </span>
-                <span className="text-blue-600 font-semibold underline decoration-blue-300 underline-offset-4 group-hover:text-blue-700">
+                <span className="text-primary font-semibold underline decoration-primary/30 underline-offset-4 hover:text-primary/80">
                   Register here
                 </span>
               </button>
