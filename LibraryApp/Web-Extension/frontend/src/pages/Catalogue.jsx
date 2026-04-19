@@ -6,7 +6,7 @@ import { Search, BookOpen, LayoutGrid, Monitor, Code, Globe, Database, Network, 
 import RequestModal from '../components/RequestModal';
 import BookDetailModal from '../components/BookDetailModal';
 import EmptyState from '../components/ui/EmptyState';
-import { SkeletonCard } from '../components/ui/Skeleton';
+import Skeleton, { SkeletonCard } from '../components/ui/Skeleton';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import ActiveFilters from '../components/ActiveFilters';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -427,22 +427,33 @@ export default function Catalogue() {
 
 function CatalogueSkeleton() {
     return (
-        <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 pb-20">
-             <div className="bg-white/80 dark:bg-slate-900/80 border-b border-slate-200/50 dark:border-slate-800 px-4 py-8 mb-8">
+        <div className="min-h-screen bg-[#F9FAFB] dark:bg-[#0B111B] pb-20 animate-pulse">
+             <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-8 mb-8 sticky top-0 z-20">
                  <div className="max-w-7xl mx-auto space-y-6">
-                     <div className="h-8 w-48 bg-slate-200 dark:bg-slate-800 rounded-lg animate-pulse"></div>
-                     <div className="h-12 w-full max-w-2xl bg-slate-100 dark:bg-slate-900 rounded-2xl animate-pulse"></div>
-                     <div className="flex gap-3">
-                         {[1,2,3,4,5].map(i => <div key={i} className="h-9 w-24 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse"></div>)}
+                     <Skeleton className="h-8 w-48 rounded-lg" />
+                     <Skeleton className="h-12 w-full max-w-2xl rounded-2xl" />
+                     {/* Filters Skeleton */}
+                     <div className="flex gap-3 overflow-x-auto pb-2">
+                         {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-9 w-24 rounded-full flex-shrink-0" />)}
                      </div>
                  </div>
              </div>
-             <div className="max-w-7xl mx-auto px-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-8">
-                 {[1,2,3,4,5,6,7,8,9,10].map(i => (
-                     <div key={i} className="space-y-3">
-                         <div className="aspect-[2/3] bg-slate-200 dark:bg-slate-800 rounded-md animate-pulse"></div>
-                         <div className="h-4 w-3/4 bg-slate-200 dark:bg-slate-800 rounded animate-pulse"></div>
-                         <div className="h-3 w-1/2 bg-slate-200 dark:bg-slate-800 rounded animate-pulse"></div>
+             
+             <div className="max-w-7xl mx-auto px-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                 {[...Array(12)].map((_, i) => (
+                     <div key={i} className="bg-white dark:bg-slate-900 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
+                         {/* Book Cover Aspect Ratio Match */}
+                         <div className="relative aspect-[2/3] w-full p-4 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-center">
+                             <Skeleton className="w-[85%] h-[95%] rounded-md shadow flex-shrink-0" />
+                         </div>
+                         <div className="p-4 flex flex-col flex-grow space-y-3">
+                             <Skeleton className="h-5 w-[85%] rounded" />
+                             <Skeleton className="h-3 w-[60%] rounded" />
+                             <div className="mt-auto pt-4 flex gap-2">
+                                <Skeleton className="h-6 w-16 rounded-full" />
+                                <Skeleton className="h-6 w-12 rounded-full" />
+                             </div>
+                         </div>
                      </div>
                  ))}
              </div>
