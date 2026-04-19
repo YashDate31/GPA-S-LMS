@@ -114,13 +114,16 @@ export default function BookDetails() {
               </h1>
               <p className="text-lg text-text-secondary font-medium mb-6">by {book.author}</p>
 
-              {/* Stats Grid */}
-              <div className="grid grid-cols-2 gap-4 mb-8">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
                 <div className="p-4 rounded-xl bg-background border border-border">
                    <div className="text-text-secondary text-xs font-semibold uppercase mb-1 flex items-center gap-1"><Copy size={12}/> Total Copies</div>
                    <div className="text-2xl font-bold text-text-primary">{book.total_copies}</div>
                 </div>
                 <div className="p-4 rounded-xl bg-background border border-border">
+                   <div className="text-text-secondary text-xs font-semibold uppercase mb-1 flex items-center gap-1"><Info size={12}/> ISBN</div>
+                   <div className="text-lg font-mono font-semibold text-text-primary mt-1 break-all">{book.isbn || 'N/A'}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-background border border-border col-span-2 sm:col-span-1">
                    <div className="text-text-secondary text-xs font-semibold uppercase mb-1 flex items-center gap-1"><Calendar size={12}/> Added On</div>
                    <div className="text-lg font-semibold text-text-primary">2024</div> {/* Placeholder date */}
                 </div>
