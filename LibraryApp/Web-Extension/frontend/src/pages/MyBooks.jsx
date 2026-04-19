@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Book, CheckCircle2, AlertCircle, Clock, Calendar, ArrowLeft, History, BookOpen, RefreshCw, Loader2 } from 'lucide-react';
 import EmptyState from '../components/ui/EmptyState';
-import { SkeletonCard } from '../components/ui/Skeleton';
+import Skeleton, { SkeletonCard } from '../components/ui/Skeleton';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -320,14 +320,50 @@ export default function MyBooks() {
 
 function MyBooksSkeleton() {
     return (
-        <div className="max-w-5xl mx-auto px-4 py-8 space-y-8">
-            <div className="h-8 w-48 bg-slate-200 dark:bg-slate-800 rounded-lg animate-pulse"></div>
-            <div className="grid grid-cols-3 gap-4">
-                {[1,2,3].map(i => <div key={i} className="h-24 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse"></div>)}
+        <div className="max-w-5xl mx-auto px-4 py-8 space-y-8 animate-pulse">
+            <Skeleton className="h-8 w-48 rounded-lg" />
+            
+            {/* Stats Row */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[1,2,3,4].map(i => (
+                    <div key={i} className="h-24 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 flex flex-col justify-center">
+                        <Skeleton className="h-4 w-20 mb-2" />
+                        <Skeleton className="h-8 w-12" />
+                    </div>
+                ))}
             </div>
-            <div className="h-10 w-full bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse"></div>
-            <div className="grid grid-cols-2 gap-6">
-                {[1,2,3,4].map(i => <div key={i} className="h-40 bg-slate-200 dark:bg-slate-800 rounded-2xl animate-pulse"></div>)}
+
+            {/* Filter Tabs */}
+            <div className="flex gap-2">
+                {[1,2,3].map(i => (
+                    <Skeleton key={i} className="h-10 w-24 rounded-full" />
+                ))}
+            </div>
+
+            {/* Books List / Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
+                {[1,2,3,4].map(i => (
+                    <div key={i} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 flex gap-4">
+                        <Skeleton className="w-[85px] h-[120px] rounded-lg flex-shrink-0" />
+                        <div className="flex-1 flex flex-col justify-between">
+                            <div className="space-y-2">
+                                <Skeleton className="h-5 w-3/4 rounded" />
+                                <Skeleton className="h-4 w-1/2 rounded" />
+                                <Skeleton className="h-3 w-1/3 rounded mt-2" />
+                            </div>
+                            <div className="flex justify-between items-end mt-4">
+                                <div className="space-y-1.5">
+                                    <Skeleton className="h-3 w-16" />
+                                    <Skeleton className="h-4 w-24" />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Skeleton className="h-3 w-16" />
+                                    <Skeleton className="h-4 w-24" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                ))}
             </div>
         </div>
     )
