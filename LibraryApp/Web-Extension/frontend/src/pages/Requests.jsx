@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Loader2, AlertCircle, XCircle } from 'lucide-react';
+import { Loader2, AlertCircle, XCircle, Book, RefreshCw, User, Info, RotateCcw } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 
 const Requests = ({ user }) => {
@@ -33,6 +33,24 @@ const Requests = ({ user }) => {
       fetchRequests();
     } catch (err) {
       addToast(err.response?.data?.error || 'Failed to cancel request', 'error');
+    }
+  };
+
+  const reRequest = async (req) => {
+    try {
+      let parsed = req.details;
+      if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+      if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+      
+      const payload = {
+        type: req.request_type,
+        details: JSON.stringify(parsed)
+      };
+      await axios.post('/api/request', payload);
+      addToast('Request resubmitted successfully', 'success');
+      fetchRequests();
+    } catch (err) {
+      addToast(err.response?.data?.error || 'Failed to re-request', 'error');
     }
   };
 
@@ -99,50 +117,64 @@ const Requests = ({ user }) => {
           <p className="text-gray-500 dark:text-gray-400">You have no requests history.</p>
         </div>
       ) : (
-        <div className="bg-white dark:bg-dark-card rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
-                  <th className="p-4 font-semibold text-gray-600 dark:text-gray-300">Type</th>
-                  <th className="p-4 font-semibold text-gray-600 dark:text-gray-300">Details</th>
-                  <th className="p-4 font-semibold text-gray-600 dark:text-gray-300">Date</th>
-                  <th className="p-4 font-semibold text-gray-600 dark:text-gray-300">Status</th>
-                  <th className="p-4 font-semibold text-gray-600 dark:text-gray-300 text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                {requests.map((req) => (
-                  <tr key={req.req_id || req.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors">
-                    <td className="p-4 font-medium text-gray-900 dark:text-white capitalize">
-                      {req.request_type.replace('_', ' ')}
-                    </td>
-                    <td className="p-4 text-gray-600 dark:text-gray-400 max-w-xs truncate" title={formatDetails(req.details, req.request_type)}>
+        <div className="space-y-4">
+          {requests.map((req) => {
+            const Icon = req.request_type === 'renewal' ? RefreshCw : req.request_type === 'profile_update' ? User : req.request_type === 'book_request' ? Book : Info;
+            
+            return (
+              <div key={req.req_id || req.id} className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col sm:flex-row gap-5">
+                {/* Icon */}
+                <div className="flex-shrink-0">
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center ${req.status === 'rejected' ? 'bg-red-50 text-red-500' : req.status === 'approved' ? 'bg-emerald-50 text-emerald-500' : 'bg-amber-50 text-amber-500'}`}>
+                    <Icon size={24} />
+                  </div>
+                </div>
+                
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-2">
+                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">
                       {formatDetails(req.details, req.request_type)}
-                    </td>
-                    <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                      {new Date(req.created_at).toLocaleDateString()}
-                    </td>
-                    <td className="p-4">
+                    </h3>
+                    <div className="flex items-center gap-3 shrink-0">
                       {getStatusBadge(req.status)}
-                    </td>
-                    <td className="p-4 text-right">
-                      {req.status === 'pending' && (
-                        <button
-                          onClick={() => cancelRequest(req.req_id || req.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
-                          title="Cancel Request"
-                        >
-                          <XCircle size={16} />
-                          Cancel
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      <span className="text-xs text-slate-500 font-medium whitespace-nowrap">
+                        {new Date(req.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  </div>
+                  
+                  {req.status === 'rejected' && (req.remark || req.admin_remark) && (
+                    <div className="mt-3 p-3 bg-red-50 dark:bg-red-900/10 rounded-lg border border-red-100 dark:border-red-900/30">
+                      <p className="text-sm text-red-800 dark:text-red-300 font-medium">
+                        <span className="font-bold">Reason: </span> {req.remark || req.admin_remark}
+                      </p>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Actions */}
+                <div className="flex flex-row sm:flex-col justify-end gap-2 border-t sm:border-t-0 sm:border-l border-slate-100 dark:border-slate-800 pt-4 sm:pt-0 sm:pl-4 mt-2 sm:mt-0 sm:min-w-[120px]">
+                  {req.status === 'pending' && (
+                    <button
+                      onClick={() => cancelRequest(req.req_id || req.id)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-bold text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 rounded-xl transition-colors"
+                    >
+                      <XCircle size={16} /> Cancel
+                    </button>
+                  )}
+                  {req.status === 'rejected' && req.request_type !== 'profile_update' && (
+                    <button
+                      onClick={() => reRequest(req)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-bold text-blue-600 hover:text-white border border-blue-200 hover:bg-blue-600 rounded-xl transition-colors"
+                    >
+                      <RotateCcw size={16} /> Re-request
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

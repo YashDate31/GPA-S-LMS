@@ -19,7 +19,7 @@ export default function Settings({ user, setUser }) {
         setEmail(user.email || '');
         // Use user.settings if available, or fallbacks
         const settings = user.settings || {};
-        setLibraryAlerts(settings.libraryAlerts ?? false);
+        setLibraryAlerts(settings.libraryAlerts ?? true);
         setLoanReminders(settings.loanReminders ?? true);
         setDarkMode(settings.theme === 'dark');
 
@@ -43,7 +43,7 @@ export default function Settings({ user, setUser }) {
   // Initial State for dirty checking (Derived from user prop to keep in sync)
   const initialSettings = {
     email: user?.email || '',
-    libraryAlerts: user?.settings?.libraryAlerts ?? false,
+    libraryAlerts: user?.settings?.libraryAlerts ?? true,
     loanReminders: user?.settings?.loanReminders ?? true,
     darkMode: user?.settings?.theme === 'dark',
 
@@ -149,17 +149,30 @@ export default function Settings({ user, setUser }) {
         
         {/* Account Panel */}
         <Panel title="Account" icon={Shield} delay={0.1}>
-             {/* Email */}
-             <div className="space-y-2">
+             <div className="space-y-2 mb-6">
                 <label className="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center gap-2 transition-colors">
                     <Mail size={16} /> Email Address
                 </label>
-                <input 
-                  type="email" 
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-medium text-slate-800 dark:text-white"
-                />
+                <div className="relative flex items-center">
+                    <input 
+                      type="email" 
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-medium text-slate-800 dark:text-white"
+                    />
+                    {email !== initialSettings.email && (
+                        <button 
+                            onClick={handleSave} 
+                            disabled={isSaving}
+                            className="absolute right-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors shadow-sm"
+                        >
+                            {isSaving ? 'Saving' : 'Save Email'}
+                        </button>
+                    )}
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5">
+                    <strong>Why is this important?</strong> We use your email to send loan reminders, notifications for overdue books, and updates when requested titles become available.
+                </p>
              </div>
 
              {/* Password Accordion */}
@@ -262,8 +275,8 @@ export default function Settings({ user, setUser }) {
                         <Trash2 size={24} />
                     </div>
                     <div>
-                        <h3 className="font-bold text-red-900 dark:text-red-400 text-lg transition-colors">Delete Account</h3>
-                        <p className="text-red-700/80 dark:text-red-300/60 text-sm font-medium transition-colors">Permanently remove your data from the system.</p>
+                        <h3 className="font-bold text-red-900 dark:text-red-400 text-lg transition-colors">Request Account Deletion</h3>
+                        <p className="text-red-700/80 dark:text-red-300/60 text-sm font-medium transition-colors">Submit a request to permanently delete your account. This action requires manual approval from the librarian.</p>
                     </div>
                 </div>
                 <button 

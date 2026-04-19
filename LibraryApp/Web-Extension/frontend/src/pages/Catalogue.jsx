@@ -23,7 +23,7 @@ const CATEGORY_ICONS = {
   'Competitive Programming': Code
 };
 
-const PAGE_SIZE = 30;
+const PAGE_SIZE = 20;
 
 // Generative book cover colors based on category/title hash
 const getCoverStyle = (category) => {
@@ -64,7 +64,8 @@ export default function Catalogue() {
   // Filter States
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [availabilityFilter, setAvailabilityFilter] = useState('all'); // 'all', 'available', 'out_of_stock'
-  
+  const [sortBy, setSortBy] = useState('relevance');
+
   // UI States
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -81,7 +82,7 @@ export default function Catalogue() {
     useEffect(() => {
         fetchBooks();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentPage, debouncedSearchTerm, selectedCategory, availabilityFilter]);
+    }, [currentPage, debouncedSearchTerm, selectedCategory, availabilityFilter, sortBy]);
 
   const fetchBooks = async () => {
         setError(null);
@@ -92,11 +93,19 @@ export default function Catalogue() {
                     q: debouncedSearchTerm,
                     category: selectedCategory,
                     availability: availabilityFilter,
+                    sort: sortBy,
                     page: currentPage,
                     per_page: PAGE_SIZE,
                 }
             });
-      setBooks(data.books || []);
+            
+      let fetchedBooks = data.books || [];
+      // Client-side sorting fallback in case backend ignores sort
+      if (sortBy === 'newest') fetchedBooks.sort((a,b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      if (sortBy === 'title_asc') fetchedBooks.sort((a,b) => (a.title || '').localeCompare(b.title || ''));
+      if (sortBy === 'most_available') fetchedBooks.sort((a,b) => (b.available_copies || 0) - (a.available_copies || 0));
+      
+      setBooks(fetchedBooks);
             setPagination(data.pagination || {
                 page: currentPage,
                 per_page: PAGE_SIZE,
@@ -149,11 +158,12 @@ export default function Catalogue() {
                   </div>
 
                   {/* Search Bar */}
-                  <div className="flex-1 max-w-2xl relative group">
+                  <div className="flex-1 lg:flex-[0.6] relative group">
                       <div className="absolute inset-0 bg-blue-500/5 dark:bg-blue-500/20 rounded-2xl blur-xl group-focus-within:bg-blue-500/10 dark:group-focus-within:bg-blue-500/10 transition-colors"></div>
                       <div className="relative bg-white/50 dark:bg-slate-800/50 backdrop-blur-sm border border-slate-200 dark:border-slate-700 rounded-2xl flex items-center px-4 py-3 shadow-sm focus-within:shadow-md focus-within:border-blue-300 dark:focus-within:border-blue-500 transition-all">
                           <Search className="text-slate-400 mr-3 shrink-0" size={20} />
                           <input 
+                              autoFocus
                               type="text" 
                               placeholder="Search titles, authors, ISBN..." 
                               className="bg-transparent border-none outline-none text-slate-700 dark:text-white w-full placeholder:text-slate-400 font-medium"
@@ -216,6 +226,20 @@ export default function Catalogue() {
                               >
                                 Out of Stock
                               </button>
+                                
+                                <div className="ml-auto flex items-center gap-2 border-l border-slate-200 dark:border-slate-700 pl-4">
+                                  <span className="text-sm font-medium text-slate-500 dark:text-slate-400">Sort by:</span>
+                                  <select
+                                      value={sortBy}
+                                      onChange={(e) => { setSortBy(e.target.value); setCurrentPage(1); }}
+                                      className="bg-white dark:bg-slate-900/50 text-slate-700 dark:text-slate-200 text-sm font-medium border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                                  >
+                                      <option value="relevance">Relevance</option>
+                                      <option value="newest">Newest Additions</option>
+                                      <option value="title_asc">Title (A-Z)</option>
+                                      <option value="most_available">Most Available</option>
+                                  </select>
+                              </div>
                           </div>
                       </motion.div>
                   )}
@@ -274,7 +298,7 @@ export default function Catalogue() {
                                 <div className="absolute top-2 right-2 w-full h-full bg-slate-100 rounded-r-sm shadow-sm border-l border-slate-300"></div>
                                 
                                 {/* Main Cover */}
-                                <div className={`absolute inset-0 rounded-r-md shadow-xl group-hover:shadow-2xl transition-shadow bg-gradient-to-br ${getCoverStyle(book.category)} flex flex-col p-4 text-white overflow-hidden`}>
+                                <div className={`absolute inset-0 rounded-r-md shadow-xl group-hover:shadow-2xl transition-all bg-gradient-to-br ${getCoverStyle(book.category)} flex flex-col p-4 text-white overflow-hidden ${book.available_copies === 0 ? 'grayscale opacity-90' : ''}`}>
                                     <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-colors"></div>
                                     <div className="absolute -right-4 -bottom-4 text-white/10 opacity-50">
                                         <Book size={120} />
@@ -310,17 +334,17 @@ export default function Catalogue() {
                                     {book.title}
                                 </h4>
                                 <div className="flex items-center justify-between px-1">
-                                    <span className="text-xs text-slate-500 dark:text-slate-400 font-medium truncate max-w-[60%]">
+                                    <span className="text-xs text-slate-500 dark:text-slate-400 font-medium truncate max-w-[50%]">
                                         {book.author}
                                     </span>
                                     {book.available_copies > 0 ? (
-                                        <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
+                                        <span className="flex items-center gap-1 text-[11px] font-black text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200">
                                             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
                                             {book.available_copies} Left
                                         </span>
                                     ) : (
-                                        <span className="text-[10px] font-bold text-orange-600 bg-orange-50 px-2 py-0.5 rounded-full">
-                                            Taken
+                                        <span className="text-[11px] font-black text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full ring-1 ring-slate-200">
+                                            Out of Stock
                                         </span>
                                     )}
                                 </div>

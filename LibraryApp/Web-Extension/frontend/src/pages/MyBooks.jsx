@@ -7,7 +7,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
 // Reusing the cover generator for consistency
-const getCoverStyle = (title) => {
+const getCoverStyle = (title, isOverdue) => {
+    if (isOverdue) return 'from-slate-700 to-slate-900 grayscale';
     // Simple hash to pick a color based on title length/chars
     const colors = [
         'from-blue-600 to-indigo-700',
@@ -206,9 +207,9 @@ export default function MyBooks() {
                         >
                             {/* 3D Mini Cover */}
                             <div className="shrink-0 w-24 perspective-1000 relative z-10">
-                                <div className={`relative aspect-[2/3] rounded-r-md shadow-lg transform transition-transform duration-300 group-hover:rotate-y-12 bg-gradient-to-br ${getCoverStyle(book.title)} flex items-center justify-center p-2 text-center`}>
+                                <div className={`relative aspect-[2/3] rounded-r-md shadow-lg transform transition-transform duration-300 group-hover:rotate-y-12 bg-gradient-to-br ${getCoverStyle(book.title, book.status === 'overdue')} flex items-center justify-center p-2 text-center`}>
                                      <div className="absolute inset-0 bg-black/10"></div>
-                                     <Book className="text-white/30 absolute bottom-2 right-2" size={32} />
+                                     <Book className="text-white/30 absolute bottom-2 right-2 transition-transform group-hover:scale-110" size={32} />
                                      <span className="text-[9px] font-bold text-white uppercase tracking-wider relative z-10 line-clamp-2 leading-tight">
                                          {book.title}
                                      </span>
@@ -242,22 +243,22 @@ export default function MyBooks() {
                                 
                                 <div className="mt-auto space-y-2">
                                     {/* Dates Grid */}
-                                    <div className="grid grid-cols-2 gap-2 text-xs font-medium text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 p-2 rounded-lg transition-colors">
+                                    <div className="grid grid-cols-2 gap-2 text-xs font-medium text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg transition-colors border border-slate-100 dark:border-slate-800">
                                         <div>
-                                            <span className="block text-[10px] uppercase text-slate-400 font-bold">Borrowed</span>
-                                            {new Date(book.borrow_date || book.borrowed_date).toLocaleDateString()}
+                                            <span className="block text-[10px] uppercase text-slate-400 font-bold mb-0.5">Borrowed</span>
+                                            {new Date(book.borrow_date || book.borrowed_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
                                         </div>
                                         <div>
                                             {book.return_date ? (
                                                 <>
-                                                    <span className="block text-[10px] uppercase text-emerald-500 font-bold">Returned</span>
-                                                    <span className="text-emerald-700">{new Date(book.return_date).toLocaleDateString()}</span>
+                                                    <span className="block text-[10px] uppercase text-emerald-500 font-bold mb-0.5">Returned</span>
+                                                    <span className="text-emerald-700 dark:text-emerald-400 font-bold">{new Date(book.return_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
                                                 </>
                                             ) : (
                                                 <>
-                                                    <span className={`block text-[10px] uppercase font-bold ${book.status === 'overdue' ? 'text-red-500' : 'text-slate-400'}`}>Due Date</span>
-                                                    <span className={book.status === 'overdue' ? 'text-red-600 font-bold' : ''}>
-                                                        {new Date(book.due_date).toLocaleDateString()}
+                                                    <span className={`block text-[10px] uppercase font-bold mb-0.5 ${book.status === 'overdue' ? 'text-red-500' : 'text-slate-400'}`}>Due Date</span>
+                                                    <span className={book.status === 'overdue' ? 'text-red-600 dark:text-red-400 font-bold' : ''}>
+                                                        {new Date(book.due_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
                                                     </span>
                                                 </>
                                             )}
@@ -265,9 +266,15 @@ export default function MyBooks() {
                                     </div>
 
                                     {/* Alerts */}
-                                    {book.status === 'overdue' && book.fine && (
-                                        <div className="flex items-center gap-2 text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg">
-                                            <span>Fine: ₹{book.fine}</span>
+                                    {book.status === 'overdue' && book.fine > 0 && (
+                                        <div className="flex items-center gap-2 text-xs font-bold text-red-600 bg-red-50 dark:bg-red-900/20 px-3 py-1.5 rounded-lg border border-red-100 dark:border-red-900/30">
+                                            <span>Current Fine: ₹{book.fine}</span>
+                                        </div>
+                                    )}
+
+                                    {book.fine_paid && (
+                                        <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-1.5 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
+                                            <span>Fine Paid: ₹{book.fine || 0}</span>
                                         </div>
                                     )}
 

@@ -1,10 +1,9 @@
-import { Outlet, Link, useLocation } from 'react-router-dom';
-import { LogOut, LayoutDashboard, BookOpen, Clock, FileText, Bell, Search, User, Settings, ScanLine, Menu, X, ChevronLeft, ChevronRight, Home, PanelLeftClose, PanelLeftOpen, Pin, PinOff, GraduationCap, Mail } from 'lucide-react';
+import { LogOut, LayoutDashboard, BookOpen, Clock, FileText, Bell, Search, User, Settings, ScanLine, Menu, X, ChevronLeft, ChevronRight, Home, PanelLeftClose, PanelLeftOpen, Pin, PinOff, GraduationCap, Mail, MoreHorizontal, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import { useState, useEffect, useRef } from 'react';
 import Breadcrumbs from './Breadcrumbs';
-import AlertBanner from './AlertBanner';
+import { useLocation, Link, Outlet } from 'react-router-dom';
 
 // --- Navigation Configuration ---
 const NAV_ITEMS = [
@@ -21,6 +20,7 @@ const NAV_ITEMS = [
     items: [
       { id: 'study-materials', label: 'Study Materials', icon: GraduationCap, path: '/study-materials' },
       { id: 'services', label: 'Services', icon: FileText, path: '/services' },
+      { id: 'my-books', label: 'My Books', icon: BookOpen, path: '/my-books' },
       { id: 'history', label: 'History', icon: Clock, path: '/history' },
       { id: 'requests', label: 'Requests', icon: Bell, path: '/requests' }
     ]
@@ -67,7 +67,9 @@ export default function Layout({ user, setUser }) {
   }, []);
 
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const profileMenuRef = useRef(null);
+  const mobileMoreRef = useRef(null);
 
   const handleLogout = async () => {
     await axios.post('/api/logout');
@@ -146,10 +148,13 @@ export default function Layout({ user, setUser }) {
       if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) {
         setProfileMenuOpen(false);
       }
+      if (mobileMoreRef.current && !mobileMoreRef.current.contains(event.target)) {
+        setMobileMoreOpen(false);
+      }
     };
-    if (profileMenuOpen) document.addEventListener('mousedown', handleClickOutside);
+    if (profileMenuOpen || mobileMoreOpen) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [profileMenuOpen]);
+  }, [profileMenuOpen, mobileMoreOpen]);
 
   // --- Render Components ---
 
@@ -164,33 +169,48 @@ export default function Layout({ user, setUser }) {
           flex items-center gap-3 py-3 rounded-md transition-colors duration-200 group relative
           ${!isExpanded ? 'justify-center px-2' : 'px-4'}
           ${isActive 
-            ? 'bg-brand-blue/10 text-brand-blue font-bold shadow-[inset_3px_0_0_0_#2563EB]' 
-            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900 shadow-[inset_3px_0_0_0_transparent]'}
+            ? 'bg-blue-600/10 text-blue-600 font-black shadow-[inset_4px_0_0_0_#2563EB] dark:bg-blue-600/20 dark:text-blue-400' 
+            : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white shadow-[inset_4px_0_0_0_transparent]'}
         `}
       >
-        <Icon size={22} className={`shrink-0 transition-colors ${isActive ? 'text-brand-blue' : 'text-slate-400 group-hover:text-slate-600'}`} strokeWidth={isActive ? 2.5 : 2} />
+        <Icon size={22} className={`shrink-0 transition-all duration-300 ${isActive ? 'text-blue-600 dark:text-blue-400 scale-110' : 'text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300'}`} strokeWidth={isActive ? 2.5 : 2} />
         
-        <span className={`nav-label-container transition-all duration-150 ease-out whitespace-nowrap overflow-hidden ${isExpanded ? 'opacity-100 translate-x-0 w-auto' : 'opacity-0 -translate-x-2 w-0'}`}>
+        <span className={`nav-label-container transition-all duration-300 ease-out whitespace-nowrap overflow-hidden ${isExpanded ? 'opacity-100 translate-x-0 w-auto ml-1' : 'opacity-0 -translate-x-4 w-0'}`}>
           {label}
         </span>
       </Link>
     );
   };
 
-  const MobileTabItem = ({ to, icon: Icon, label }) => {
-    const isActive = location.pathname === to || (to !== '/' && location.pathname.startsWith(to));
+  const MobileTabItem = ({ to, icon: Icon, label, onClick, isMore }) => {
+    const isActive = !isMore && (location.pathname === to || (to !== '/' && location.pathname.startsWith(to)));
+    const content = (
+      <>
+        {isActive && (
+           <span className="absolute top-0 w-8 h-1 bg-brand-blue rounded-full" />
+        )}
+        <Icon size={22} className={isActive ? 'text-brand-blue' : 'text-slate-400 group-hover:text-slate-600'} strokeWidth={isActive ? 2.5 : 2} />
+        <span className={`text-[10px] mt-1 font-bold ${isActive ? 'text-brand-blue' : 'text-slate-500'}`}>{label}</span>
+      </>
+    );
+
+    if (onClick) {
+        return (
+            <button 
+                onClick={onClick}
+                className={`flex flex-col items-center justify-center w-full py-2 transition-all relative group ${isActive ? 'scale-110' : ''}`}
+            >
+                {content}
+            </button>
+        );
+    }
+
     return (
       <Link 
         to={to}
-        className={`flex flex-col items-center justify-center w-full py-2 transition-colors relative ${
-          isActive ? 'text-brand-blue font-bold' : 'text-slate-400 hover:text-slate-600 font-medium'
-        }`}
+        className={`flex flex-col items-center justify-center w-full py-2 transition-all relative group ${isActive ? 'scale-110' : ''}`}
       >
-        {isActive && (
-           <span className="absolute top-0 w-12 h-0.5 bg-brand-blue rounded-full" />
-        )}
-        <Icon size={24} className={isActive ? 'fill-current opacity-20' : ''} strokeWidth={isActive ? 2.5 : 2} />
-        <span className="text-[10px] mt-1">{label}</span>
+        {content}
       </Link>
     );
   };
@@ -202,9 +222,6 @@ export default function Layout({ user, setUser }) {
 
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-950 font-sans text-slate-900 dark:text-slate-100 overflow-hidden isolate relative transition-colors duration-300">
-      <div className="fixed top-0 left-0 right-0 z-[60]">
-         <AlertBanner />
-      </div>
       
       {/* Accessibility: Skip to Content */}
       <a href="#main-content" className="sr-only focus:not-sr-only focus:absolute focus:top-24 focus:left-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-blue-600 focus:text-white focus:rounded-md focus:shadow-lg focus:outline-none">
@@ -423,12 +440,68 @@ export default function Layout({ user, setUser }) {
         </main>
 
         {/* Mobile Tab Bar */}
-        <div className="md:hidden fixed bottom-6 left-4 right-4 h-16 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-white/20 dark:border-slate-800 z-50 flex justify-around items-center px-2 transition-all duration-300">
-             <MobileTabItem to="/" icon={LayoutDashboard} label="Dashboard" />
+        <div className="md:hidden fixed bottom-4 left-4 right-4 h-18 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl rounded-2xl shadow-[0_10px_40px_rgba(0,0,0,0.2)] border border-white/50 dark:border-slate-800 z-[100] flex justify-around items-center px-1 transition-all duration-300">
+             <MobileTabItem to="/" icon={LayoutDashboard} label="Home" />
              <MobileTabItem to="/books" icon={BookOpen} label="Catalogue" />
              <MobileTabItem to="/my-books" icon={Clock} label="My Books" />
-             <MobileTabItem to="/profile" icon={User} label="Profile" />
+             <MobileTabItem to="/notifications" icon={Bell} label="Inbox" />
+             <MobileTabItem onClick={() => setMobileMoreOpen(true)} icon={MoreHorizontal} label="More" isMore />
         </div>
+
+        {/* Mobile "More" Drawer */}
+        <AnimatePresence>
+            {mobileMoreOpen && (
+                <>
+                    <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setMobileMoreOpen(false)}
+                        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110]"
+                    />
+                    <motion.div 
+                        initial={{ y: '100%' }}
+                        animate={{ y: 0 }}
+                        exit={{ y: '100%' }}
+                        transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                        className="fixed inset-x-0 bottom-0 bg-white dark:bg-slate-900 rounded-t-[2.5rem] z-[120] pb-12 pt-4 px-6 shadow-2xl border-t border-white/10"
+                        ref={mobileMoreRef}
+                    >
+                        <div className="w-12 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full mx-auto mb-8" />
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                            {[
+                                { to: '/profile', icon: User, label: 'Profile', color: 'bg-blue-50 text-blue-600' },
+                                { to: '/history', icon: Clock, label: 'History', color: 'bg-purple-50 text-purple-600' },
+                                { to: '/requests', icon: Bell, label: 'Requests', color: 'bg-amber-50 text-amber-600' },
+                                { to: '/services', icon: FileText, label: 'Services', color: 'bg-emerald-50 text-emerald-600' },
+                                { to: '/study-materials', icon: GraduationCap, label: 'Study Mats', color: 'bg-indigo-50 text-indigo-600' },
+                                { to: '/settings', icon: Settings, label: 'Settings', color: 'bg-slate-100 text-slate-600' },
+                                { to: '/contact', icon: Mail, label: 'Contact', color: 'bg-rose-50 text-rose-600' }
+                            ].map((item) => (
+                                <Link 
+                                    key={item.label}
+                                    to={item.to}
+                                    onClick={() => setMobileMoreOpen(false)}
+                                    className="flex flex-col items-center gap-3 p-4 rounded-3xl bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                >
+                                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${item.color} dark:bg-opacity-20`}>
+                                        <item.icon size={24} />
+                                    </div>
+                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{item.label}</span>
+                                </Link>
+                            ))}
+                            <button 
+                                onClick={handleLogout}
+                                className="col-span-2 flex items-center justify-center gap-3 p-4 rounded-3xl bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 font-bold mt-4"
+                            >
+                                <LogOut size={20} /> Logout
+                            </button>
+                        </div>
+                    </motion.div>
+                </>
+            )}
+        </AnimatePresence>
       </div>
     </div>
   );

@@ -8,6 +8,7 @@ import Skeleton from '../components/ui/Skeleton';
 import ErrorMessage from '../components/ui/ErrorMessage';
 import EmptyState from '../components/ui/EmptyState';
 import BookLoanCard from '../components/BookLoanCard';
+import AlertBanner from '../components/AlertBanner';
 
 export default function Dashboard({ user }) {
   const navigate = useNavigate();
@@ -135,6 +136,7 @@ export default function Dashboard({ user }) {
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 pb-24 md:pb-10 transition-colors">
       <div className="px-4 py-6 space-y-8 max-w-5xl mx-auto">
+        <AlertBanner />
         
         {/* Z-Pattern: 1. Header & Most Urgent Action */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
