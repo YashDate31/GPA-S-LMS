@@ -1133,6 +1133,25 @@ def init_portal_db():
         )
     ''')
 
+    # Wishlist
+    create_table_safe(cursor, 'book_wishlist', '''
+        CREATE TABLE IF NOT EXISTS book_wishlist (
+            id SERIAL PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            enrollment_no TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(book_id, enrollment_no)
+        )
+    ''', '''
+        CREATE TABLE IF NOT EXISTS book_wishlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id TEXT NOT NULL,
+            enrollment_no TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(book_id, enrollment_no)
+        )
+    ''')
+
     # Ratings
     create_table_safe(cursor, 'book_ratings', '''
         CREATE TABLE IF NOT EXISTS book_ratings (
@@ -1719,13 +1738,13 @@ def api_loan_history():
     
     # Get ALL borrow records (borrowed, returned, overdue)
     cursor.execute("""
-        SELECT b.title, b.author, b.category, br.borrow_date, br.due_date, br.return_date, br.status, br.fine
+        SELECT b.title, b.author, b.category, b.cover_url, br.borrow_date, br.due_date, br.return_date, br.status, br.fine
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ?
         ORDER BY br.borrow_date DESC
     """, (enrollment,))
-    
+
     all_records = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
@@ -2181,7 +2200,7 @@ def api_dashboard():
     
     # Active Loans
     cursor.execute("""
-        SELECT b.title, b.author, br.borrow_date, br.due_date, br.book_id, br.accession_no, COALESCE(br.fine, 0) as fine
+        SELECT b.title, b.author, b.cover_url, br.borrow_date, br.due_date, br.book_id, br.accession_no, COALESCE(br.fine, 0) as fine
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ? AND br.status = 'borrowed'
@@ -2309,7 +2328,7 @@ def api_dashboard():
     # Wishlist count
     try:
         cursor_p.execute(
-            "SELECT COUNT(*) as c FROM book_waitlist WHERE enrollment_no = ? AND notified = 0",
+            "SELECT COUNT(*) as c FROM book_wishlist WHERE enrollment_no = ?",
             (enrollment,)
         )
         _row = cursor_p.fetchone()
@@ -2426,6 +2445,13 @@ def get_book_details(book_id):
             )
             waitlist_entry = portal_cursor.fetchone()
             book_data['on_waitlist'] = waitlist_entry is not None
+
+            # Wishlist check
+            portal_cursor.execute(
+                "SELECT id FROM book_wishlist WHERE enrollment_no = ? AND book_id = ?",
+                (session['student_id'], str(book_id))
+            )
+            book_data['isWishlisted'] = portal_cursor.fetchone() is not None
             
             portal_cursor.execute(
                 "SELECT rating FROM book_ratings WHERE enrollment_no = ? AND book_id = ?",
@@ -2448,6 +2474,59 @@ def get_book_details(book_id):
         portal_conn.close()
         conn.close()
         return jsonify(book_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/books/<book_id>/rate', methods=['POST'])
+def rate_book(book_id):
+    if 'student_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    try:
+        enrollment = session['student_id']
+        rating = int(request.json.get('rating', 0))
+        if rating < 1 or rating > 5:
+            return jsonify({'error': 'Invalid rating'}), 400
+        
+        conn = get_portal_db()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM book_ratings WHERE book_id = ? AND enrollment_no = ?", (str(book_id), enrollment))
+        if cursor.fetchone():
+            cursor.execute("UPDATE book_ratings SET rating = ? WHERE book_id = ? AND enrollment_no = ?", (rating, str(book_id), enrollment))
+        else:
+            cursor.execute("INSERT INTO book_ratings (book_id, enrollment_no, rating) VALUES (?, ?, ?)", (str(book_id), enrollment, rating))
+        
+        conn.commit()
+        
+        cursor.execute("SELECT AVG(rating), COUNT(rating) FROM book_ratings WHERE book_id = ?", (str(book_id),))
+        stats = cursor.fetchone()
+        conn.close()
+        
+        return jsonify({'status': 'success', 'new_avg': round(stats[0], 1) if stats[0] else 0, 'new_count': stats[1] if stats[1] else 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/books/<book_id>/wishlist', methods=['POST'])
+def toggle_wishlist_api(book_id):
+    if 'student_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    try:
+        enrollment = session['student_id']
+        conn = get_portal_db()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM book_wishlist WHERE book_id = ? AND enrollment_no = ?", (str(book_id), enrollment))
+        if cursor.fetchone():
+            cursor.execute("DELETE FROM book_wishlist WHERE book_id = ? AND enrollment_no = ?", (str(book_id), enrollment))
+            status = 'removed'
+        else:
+            cursor.execute("INSERT INTO book_wishlist (book_id, enrollment_no) VALUES (?, ?)", (str(book_id), enrollment))
+            status = 'added'
+            
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'action': status})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2922,7 +3001,8 @@ def api_books():
             b.author,
             b.category,
             b.total_copies,
-            COALESCE(b.available_copies, 0) AS available_copies
+            COALESCE(b.available_copies, 0) AS available_copies,
+            b.cover_url
         {from_sql}
         {where_sql}
         ORDER BY b.title

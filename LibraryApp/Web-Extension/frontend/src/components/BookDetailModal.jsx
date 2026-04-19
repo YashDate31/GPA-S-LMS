@@ -21,7 +21,7 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
     if (isOpen && bookId) {
       fetchBookDetails();
       setRequestStatus('idle');
-      setIsWishlisted(false); // Reset/Mock
+      // Reset logic handled in fetchBookDetails
       setShareOpen(false);
     } else {
       setBook(null);
@@ -39,6 +39,7 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
       if (data.rating_avg !== undefined) {
         setRatingStats({ avg: data.rating_avg || 0, count: data.rating_count || 0 });
         setUserRating(data.user_rating || 0);
+        setIsWishlisted(data.isWishlisted || false);
       }
     } catch (err) {
       console.error("Error fetching book details:", err);
@@ -82,14 +83,24 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
     }
   };
 
-  const toggleWishlist = () => {
-    setIsWishlisted(!isWishlisted);
-    if (!isWishlisted) {
-      addToast('Added to wishlist', 'success');
-    } else {
-      addToast('Removed from wishlist', 'info');
+    const toggleWishlist = async () => {
+    if (!book) return;
+    const oldWish = isWishlisted;
+    setIsWishlisted(!isWishlisted); // Optimistic UI
+    
+    try {
+      const { data } = await axios.post(`/api/books/${book.book_id}/wishlist`);
+      if (data.action === 'added') {
+        addToast('Added to wishlist', 'success');
+        setIsWishlisted(true);
+      } else {
+        addToast('Removed from wishlist', 'info');
+        setIsWishlisted(false);
+      }
+    } catch(err) {
+      setIsWishlisted(oldWish); // revert on auth/api error
+      addToast('Failed to update wishlist', 'error');
     }
-    // Future: API call to sync wishlist
   };
 
   const handleShare = (method) => {

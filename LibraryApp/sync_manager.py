@@ -237,8 +237,8 @@ class SyncManager:
             
             # Library tables (bidirectional sync)
             default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'system_settings']
-            default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth']
-            default_portal_tables_push = ['notices', 'student_auth']
+            default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth', 'book_wishlist', 'book_ratings']
+            default_portal_tables_push = ['notices', 'student_auth', 'book_wishlist', 'book_ratings']
 
             if tables_override:
                 requested = set(tables_override)
@@ -777,6 +777,8 @@ class SyncManager:
         'notices':           None,
         'student_auth':      ('enrollment_no',),
         'deletion_requests': ('student_id', 'timestamp'),
+        'book_wishlist':     ('book_id', 'enrollment_no'),
+        'book_ratings':      ('book_id', 'enrollment_no'),
     }
 
     def _get_primary_key(self, table_name):
@@ -837,8 +839,16 @@ class SyncManager:
                 unique_key_cols = ['student_id', 'timestamp']
             elif table_name == 'student_auth':
                 unique_key_cols = ['enrollment_no']
+            elif table_name == 'book_wishlist':
+                unique_key_cols = ['book_id', 'enrollment_no']
+            elif table_name == 'book_ratings':
+                unique_key_cols = ['book_id', 'enrollment_no']
             elif table_name == 'notices':
                 unique_key_cols = ['title', 'created_at']
+            elif table_name == 'book_wishlist':
+                unique_key_cols = ['book_id', 'enrollment_no']
+            elif table_name == 'book_ratings':
+                unique_key_cols = ['book_id', 'enrollment_no']
             else:
                 unique_key_cols = ['created_at']  # Fallback
             
@@ -869,7 +879,7 @@ class SyncManager:
                     
                     if exists:
                         # For student_auth, update existing records (password may have changed)
-                        if table_name == 'student_auth':
+                        if table_name == 'student_auth' or table_name == 'book_ratings':
                             update_cols = []
                             update_vals = []
                             for rc in remote_columns:
@@ -958,6 +968,29 @@ class SyncManager:
                         )
                     """)
                     remote_conn.commit()
+                elif table_name == 'book_wishlist':
+                    remote_cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS book_wishlist (
+                            id SERIAL PRIMARY KEY,
+                            book_id TEXT NOT NULL,
+                            enrollment_no TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(book_id, enrollment_no)
+                        )
+                    """)
+                    remote_conn.commit()
+                elif table_name == 'book_ratings':
+                    remote_cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS book_ratings (
+                            id SERIAL PRIMARY KEY,
+                            book_id TEXT NOT NULL,
+                            enrollment_no TEXT NOT NULL,
+                            rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(book_id, enrollment_no)
+                        )
+                    """)
+                    remote_conn.commit()
             
             # Get records from local
             local_cursor.execute(f"SELECT * FROM {table_name}")
@@ -992,6 +1025,10 @@ class SyncManager:
                 unique_key_cols = ['title', 'created_at']
             elif table_name == 'student_auth':
                 unique_key_cols = ['enrollment_no']
+            elif table_name == 'book_wishlist':
+                unique_key_cols = ['book_id', 'enrollment_no']
+            elif table_name == 'book_ratings':
+                unique_key_cols = ['book_id', 'enrollment_no']
             else:
                 unique_key_cols = ['created_at']
             
@@ -1019,7 +1056,7 @@ class SyncManager:
                     
                     if exists:
                         # For student_auth, update existing records (password may have changed)
-                        if table_name == 'student_auth':
+                        if table_name == 'student_auth' or table_name == 'book_ratings':
                             update_cols = []
                             update_vals = []
                             for lc in local_columns:
