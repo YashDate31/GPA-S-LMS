@@ -697,6 +697,40 @@ class Database:
         
         conn.close()
 
+        # BUG A4 FIX: Recalculate available_copies on every startup.
+        # The sync_manager correctly skips pulling available_copies from Supabase
+        # (cloud value may be corrupted by old concurrent _push_to_cloud bugs).
+        # But without a local recalculation, a corrupted count stays forever.
+        self.recalculate_available_copies()
+
+    def recalculate_available_copies(self):
+        """Recompute available_copies from actual borrow_records (source of truth).
+
+        available_copies = total_copies - COUNT(currently borrowed for that book_id).
+        This heals any corruption from prior sync bugs, manual edits, or interrupted
+        transactions that left available_copies out of sync with reality.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE books
+                SET available_copies = total_copies - COALESCE((
+                    SELECT COUNT(*) FROM borrow_records
+                    WHERE borrow_records.book_id = books.book_id
+                      AND borrow_records.status = 'borrowed'
+                ), 0)
+                WHERE total_copies IS NOT NULL
+            """)
+            # Clamp: never let available_copies go negative
+            cursor.execute("UPDATE books SET available_copies = 0 WHERE available_copies < 0")
+            conn.commit()
+            print("[Startup] available_copies recalculated from borrow_records.")
+        except Exception as e:
+            print(f"[Startup] available_copies recalculation warning: {e}")
+        finally:
+            conn.close()
+
     def _log_deletion_in_tx(self, cursor, table_name, pk_value, source='desktop'):
         """Log a deletion tombstone within an existing SQLite transaction."""
         try:

@@ -13,6 +13,27 @@ Applied **3 migrations** to the Supabase project **GPA-S-LMS** (`pistwngkqbfjgjt
 > [!IMPORTANT]
 > RLS was disabled because the app connects via **direct `psycopg2`** (not the Supabase JS SDK). RLS with no policies would block all queries.
 
+### 🟡 Bug 8 — Overdue books show "On Time" due to wrong days parser (`Dashboard.jsx`)
+**Fix:** Replaced `parseInt(book.days_msg?.replace(/\D/g, ''))` with a targeted regex `match(/^(\d+)\s*days?\s*left/i)`. Old code stripped all non-digits from strings like `"101 days late"` → `"101"`, which is > 3, so the status showed as `'normal'`. New code only extracts the "X days left" pattern; anything else (including overdue messages) defaults to 99 and relies on the primary `book.status === 'overdue'` guard.
+
+---
+
+## 🚀 Final Full Push & Known Issues
+
+A complete push to `origin main` was executed after unblocking Git from SQLite file locks.
+
+### ✅ Resolved Blocks
+- **Git Staging**: Updated `.gitignore` to exclude `*.db-shm` and `*.db-wal`. This allows `git add .` to succeed even while the database is being accessed by a running application.
+
+### ⚠️ Known Broken Items (Documented in Push)
+
+| Item | Status | Description |
+|------|--------|-------------|
+| **Librarian Crash** | 🩹 Patched / Unverified | `main.py` had an `AttributeError` on `sqlite3.Row.get()` during barcode scanning. Patched in source, but needs a full restart/test. |
+| **Sync State** | 🔴 Interrupted | The startup "Full Mirror" sync from Supabase was interrupted. Local data may be out of sync with authority. |
+| **Concurrency** | 🟡 Beta | WAL mode implemented in `database.py` but has not undergone high-concurrency stress testing yet. |
+| **Deletion Sync** | 🟡 Unverified | New tombstone logic for bidirectional deletion tracking is implemented but untested for edge-case collisions. |
+
 ## Verification
 
 - ✅ All **16 tables** confirmed present with correct columns, data types, defaults, primary keys, foreign keys, and unique constraints.

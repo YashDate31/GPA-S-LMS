@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { CheckCircle, AlertTriangle, Award, BookOpen, DollarSign, Calendar, History as HistoryIcon, XCircle, Clock } from 'lucide-react';
 import EmptyState from '../components/ui/EmptyState';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 export default function History({ user }) {
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loanHistory, setLoanHistory] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -55,7 +56,7 @@ export default function History({ user }) {
            title="No reading history yet"
            description="You haven't borrowed any books yet. Once you start reading, your history and stats will appear here."
            actionLabel="Start Reading"
-           onAction={() => window.location.href = '/books'}
+           onAction={() => navigate('/books')}
         />
      </div>
   );
@@ -67,7 +68,7 @@ export default function History({ user }) {
            title="No reading history yet"
            description="You haven't borrowed any books yet. Once you start reading, your history and stats will appear here."
            actionLabel="Start Reading"
-           onAction={() => window.location.href = '/books'}
+           onAction={() => navigate('/books')}
         />
      </div>
   );
