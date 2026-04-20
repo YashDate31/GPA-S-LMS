@@ -420,17 +420,19 @@ class Database:
         self.create_table_safe(cursor, 'admin_activity', '''
             CREATE TABLE IF NOT EXISTS admin_activity (
                 id SERIAL PRIMARY KEY,
-                action TEXT NOT NULL,
-                description TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                action TEXT NOT NULL,
+                details TEXT,
+                admin_user TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''', sqlite_sql='''
             CREATE TABLE IF NOT EXISTS admin_activity (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
-                description TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                action TEXT NOT NULL,
+                details TEXT,
+                admin_user TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
