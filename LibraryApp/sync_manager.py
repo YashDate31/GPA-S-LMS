@@ -449,6 +449,9 @@ class SyncManager:
                 "UPDATE sync_deletions SET synced_remote=1 WHERE table_name=? AND pk_value=?",
                 (table_name, pk_value)
             )
+            # CRITICAL FIX: Commit immediately per tombstone to release the SQLite WRITE lock.
+            # Otherwise we hold the lock across subsequent network calls.
+            local_conn.commit()
             pushed += 1
 
         remote_conn.commit()
@@ -1320,16 +1323,25 @@ class SyncManager:
                 rc = remote_conn.cursor()
                 lc.execute("SELECT book_id, total_copies FROM books")
                 books_list = lc.fetchall()
+                
+                updates_to_remote = []
                 for b_id, t_copies in books_list:
                     lc.execute("SELECT COUNT(*) FROM borrow_records WHERE book_id = ? AND status = 'borrowed'", (b_id,))
                     borrowed_count = lc.fetchone()[0]
                     new_available = max(0, t_copies - borrowed_count)
                     # Update local
                     lc.execute("UPDATE books SET available_copies = ?, updated_at = CURRENT_TIMESTAMP WHERE book_id = ?", (new_available, b_id))
-                    # Update remote (individual push to ensure Supabase is updated immediately after mirror fixes)
-                    rc.execute("UPDATE books SET available_copies = %s, updated_at = CURRENT_TIMESTAMP WHERE book_id = %s", (new_available, b_id))
+                    updates_to_remote.append((new_available, b_id))
                 
+                # CRITICAL FIX: Commit SQLite *BEFORE* doing Postgres network I/O.
+                # If we do rc.execute() before local_conn.commit(), SQLite holds a RESERVED/EXCLUSIVE
+                # lock while waiting for network from Supabase, locking out `borrow_book` dead in the UI.
                 local_conn.commit()
+                
+                # Now update remote without holding up the local SQLite database
+                for new_avail, b_id in updates_to_remote:
+                    rc.execute("UPDATE books SET available_copies = %s, updated_at = CURRENT_TIMESTAMP WHERE book_id = %s", (new_avail, b_id))
+                
                 remote_conn.commit()
                 remote_conn.close()
                 local_conn.close()
