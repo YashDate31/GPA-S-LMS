@@ -700,6 +700,7 @@ class SyncManager:
             # for a book with 1 copy). Local recalculation at startup is the source of truth.
             if table_name == 'books':
                 SKIP_COLS.add('available_copies')
+                SKIP_COLS.add('total_copies')
             # Only include columns that actually exist locally (handles schema drift)
             local_cursor.execute(f"PRAGMA table_info({table_name})")
             local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
@@ -1194,6 +1195,7 @@ class SyncManager:
             SKIP_COLS = {'id'}
             if table_name == 'books':
                 SKIP_COLS.add('available_copies')
+                SKIP_COLS.add('total_copies')
                 
             local_cursor.execute(f"PRAGMA table_info({table_name})")
             local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
@@ -1318,9 +1320,21 @@ class SyncManager:
                 
                 # --- NEW Step: Recalculate available_copies based on active borrows ---
                 # This fixes corrupted counts by deriving them solely from current borrow status
-                print("[Auto-Sync] Recalculating book available_copies...")
+                print("[Auto-Sync] Recalculating book copies...")
                 lc = local_conn.cursor()
                 rc = remote_conn.cursor()
+
+                # Fix total_copies from barcode (source of truth: actual accession count)
+                lc.execute("""
+                    UPDATE books
+                    SET total_copies = (
+                        LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1
+                    )
+                    WHERE barcode IS NOT NULL AND TRIM(barcode) != ''
+                    AND total_copies != (LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1)
+                """)
+                local_conn.commit()
+
                 lc.execute("SELECT book_id, total_copies FROM books")
                 books_list = lc.fetchall()
                 
