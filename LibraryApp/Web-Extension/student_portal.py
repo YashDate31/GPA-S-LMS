@@ -874,7 +874,8 @@ def _ensure_local_library_schema():
                 available_copies INTEGER DEFAULT 1,
                 date_added DATE DEFAULT CURRENT_DATE,
                 barcode TEXT,
-                price REAL DEFAULT 0
+                price REAL DEFAULT 0,
+                cover_url TEXT
             )
         ''')
         cursor.execute('''
