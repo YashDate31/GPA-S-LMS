@@ -698,14 +698,6 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (enrollment_no, name, email, phone, department, year))
             conn.commit()
-            # Push to cloud immediately so web portal login works right away
-            self._push_to_cloud('''
-                INSERT INTO students (enrollment_no, name, email, phone, department, year)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (enrollment_no) DO UPDATE SET
-                    name=EXCLUDED.name, email=EXCLUDED.email, phone=EXCLUDED.phone,
-                    department=EXCLUDED.department, year=EXCLUDED.year, updated_at=CURRENT_TIMESTAMP
-            ''', (enrollment_no, name, email, phone, department, year))
             return True, "Student added successfully"
         except sqlite3.IntegrityError:
             return False, "Enrollment Number already exists"
@@ -731,10 +723,7 @@ class Database:
                 WHERE enrollment_no=?
             ''', (name, email, phone, department, year, enrollment_no))
             conn.commit()
-            self._push_to_cloud('''
-                UPDATE students SET name=?, email=?, phone=?, department=?, year=?, updated_at=CURRENT_TIMESTAMP
-                WHERE enrollment_no=?
-            ''', (name, email, phone, department, year, enrollment_no))
+            return True, "Student updated successfully"
             return True, "Student updated successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -766,8 +755,8 @@ class Database:
             conn.commit()
             
             if cursor.rowcount > 0:
-                # Push student delete immediately — web portal must stop allowing login
-                self._push_to_cloud("DELETE FROM students WHERE enrollment_no = ?", (enrollment_no,))
+                # Log deletion for sync (SyncManager will handle cloud propagation)
+                self.log_deletion('students', enrollment_no)
                 return True, f"Student '{student_name}' removed successfully"
             else:
                 return False, "Failed to remove student"
@@ -1214,17 +1203,12 @@ class Database:
             
             conn.commit()
 
-            # Best-effort cloud propagation (prevents auto-sync from resurrecting deleted rows)
+            # Log deletion tombstone for sync (SyncManager will handle cloud propagation)
             self._push_to_cloud(
                 "INSERT INTO sync_deletions (table_name, pk_value, deleted_at, source) VALUES (?, ?, CURRENT_TIMESTAMP, ?) "
                 "ON CONFLICT (table_name, pk_value) DO UPDATE SET deleted_at=EXCLUDED.deleted_at, source=EXCLUDED.source",
                 ('students', str(enrollment_no), 'desktop')
             )
-            # Mirror dependency cleanup to cloud to satisfy FK constraints, then delete student
-            self._push_to_cloud('DELETE FROM promotion_history WHERE enrollment_no = ?', (enrollment_no,))
-            self._push_to_cloud('DELETE FROM borrow_records WHERE enrollment_no = ? AND status = "returned"', (enrollment_no,))
-            self._push_to_cloud('DELETE FROM waitlist WHERE enrollment_no = ?', (enrollment_no,))
-            self._push_to_cloud('DELETE FROM students WHERE enrollment_no = ?', (enrollment_no,))
             
             # Build detailed success message
             details = []
@@ -1313,17 +1297,12 @@ class Database:
             
             conn.commit()
             
-            # Push dependency cleanup + delete to cloud (best-effort)
+            # Log deletion tombstone for sync (SyncManager will handle cloud propagation)
             self._push_to_cloud(
                 "INSERT INTO sync_deletions (table_name, pk_value, deleted_at, source) VALUES (?, ?, CURRENT_TIMESTAMP, ?) "
                 "ON CONFLICT (table_name, pk_value) DO UPDATE SET deleted_at=EXCLUDED.deleted_at, source=EXCLUDED.source",
                 ('books', str(book_id), 'desktop')
             )
-            self._push_to_cloud('DELETE FROM borrow_records WHERE book_id = ? AND status != "borrowed"', (book_id,))
-            self._push_to_cloud('DELETE FROM transactions WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM book_waitlist WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM book_ratings WHERE book_id = ?', (book_id,))
-            self._push_to_cloud('DELETE FROM books WHERE book_id = ?', (book_id,))
             
             details = []
             if deleted_borrow_history > 0:

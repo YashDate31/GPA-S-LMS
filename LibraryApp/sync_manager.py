@@ -768,7 +768,7 @@ class SyncManager:
     _NATURAL_KEY_MAP = {
         'students':          ('enrollment_no',),
         'books':             ('book_id',),
-        'borrow_records':    ('enrollment_no', 'book_id', 'borrow_date'),
+        'borrow_records':    ('enrollment_no', 'accession_no', 'borrow_date'),
         'admin_activity':    None,
         'academic_years':    ('year_name',),
         'promotion_history': ('enrollment_no', 'old_year', 'new_year', 'promotion_date'),
@@ -1145,7 +1145,7 @@ class SyncManager:
             if len(remote_rows) == 0:
                 local_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
                 local_count = local_cursor.fetchone()[0]
-                if local_count > 5:
+                if local_count > 0:
                     print(f"[Full Mirror] {table_name}: Supabase empty but local has {local_count} rows "
                           f"— pushing local -> Supabase (cloud was cleared manually)")
                     pushed = self._sync_table_local_to_remote(
@@ -1166,26 +1166,11 @@ class SyncManager:
                 remote_key_set.add(key)
 
 
-            # Delete local rows NOT present in remote (cloud has authority)
-            local_cursor.execute(f"SELECT * FROM {table_name}")
-            local_rows = local_cursor.fetchall()
-            local_all_cols = [desc[0] for desc in local_cursor.description]
-
-            deleted = 0
-            for lrow in local_rows:
-                ldict = dict(zip(local_all_cols, lrow))
-                lkey = tuple(str(ldict.get(k) or '').replace(' ', '') for k in natural_key)
-                if lkey not in remote_key_set:
-                    where = ' AND '.join([f"{k} = ?" for k in natural_key])
-                    vals = [ldict.get(k) for k in natural_key]
-                    local_cursor.execute(f"DELETE FROM {table_name} WHERE {where}", vals)
-                    deleted += 1
-
-            if deleted > 0:
-                print(f"[Full Mirror] {table_name}: removed {deleted} local rows not in Supabase")
-
-            # Now upsert all remote rows into local (reuse delta sync logic)
+            # Define columns to sync (skip ID and specific status/count columns that should not be mirrored blindly)
             SKIP_COLS = {'id'}
+            if table_name == 'books':
+                SKIP_COLS.add('available_copies')
+                
             local_cursor.execute(f"PRAGMA table_info({table_name})")
             local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
             payload_columns = [
@@ -1193,6 +1178,7 @@ class SyncManager:
                 if c.lower() not in SKIP_COLS and c.lower() in local_col_names
             ]
 
+            # 1) UPSERT all remote rows into local FIRST
             upserted = 0
             for row in remote_rows:
                 row_dict = dict(zip(all_remote_columns, row))
@@ -1220,7 +1206,24 @@ class SyncManager:
                     local_cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", payload_vals)
                 upserted += 1
 
+            # 2) DELETE local rows NOT present in remote (cloud has authority)
+            local_cursor.execute(f"SELECT * FROM {table_name}")
+            local_rows = local_cursor.fetchall()
+            local_all_cols = [desc[0] for desc in local_cursor.description]
+
+            deleted = 0
+            for lrow in local_rows:
+                ldict = dict(zip(local_all_cols, lrow))
+                lkey = tuple(str(ldict.get(k) or '').replace(' ', '') for k in natural_key)
+                if lkey not in remote_key_set:
+                    where = ' AND '.join([f"{k} = ?" for k in natural_key])
+                    vals = [ldict.get(k) for k in natural_key]
+                    local_cursor.execute(f"DELETE FROM {table_name} WHERE {where}", vals)
+                    deleted += 1
+
             local_conn.commit()
+            if deleted > 0:
+                print(f"[Full Mirror] {table_name}: removed {deleted} local rows not in Supabase")
             print(f"[Full Mirror] {table_name}: {len(remote_rows)} remote rows → {upserted} upserted, {deleted} pruned locally")
             return upserted
 
@@ -1281,11 +1284,30 @@ class SyncManager:
                 total = 0
                 for tbl in mirror_tables:
                     total += self._sync_table_full_mirror(local_conn, remote_conn, tbl)
+                
+                # --- NEW Step: Recalculate available_copies based on active borrows ---
+                # This fixes corrupted counts by deriving them solely from current borrow status
+                print("[Auto-Sync] Recalculating book available_copies...")
+                lc = local_conn.cursor()
+                rc = remote_conn.cursor()
+                lc.execute("SELECT book_id, total_copies FROM books")
+                books_list = lc.fetchall()
+                for b_id, t_copies in books_list:
+                    lc.execute("SELECT COUNT(*) FROM borrow_records WHERE book_id = ? AND status = 'borrowed'", (b_id,))
+                    borrowed_count = lc.fetchone()[0]
+                    new_available = max(0, t_copies - borrowed_count)
+                    # Update local
+                    lc.execute("UPDATE books SET available_copies = ?, updated_at = CURRENT_TIMESTAMP WHERE book_id = ?", (new_available, b_id))
+                    # Update remote (individual push to ensure Supabase is updated immediately after mirror fixes)
+                    rc.execute("UPDATE books SET available_copies = %s, updated_at = CURRENT_TIMESTAMP WHERE book_id = %s", (new_available, b_id))
+                
+                local_conn.commit()
+                remote_conn.commit()
                 remote_conn.close()
                 local_conn.close()
                 self._register_sync_success()
                 self._save_sync_time(status='completed')
-                print(f"[Auto-Sync] Full mirror complete: {total} records synced")
+                print(f"[Auto-Sync] Full mirror and count recalculation complete: {total} records synced")
             except Exception as e:
                 print(f"[Auto-Sync] Full mirror failed (offline?): {e}")
                 print(f"[Auto-Sync] Running in OFFLINE mode — using local SQLite cache")
