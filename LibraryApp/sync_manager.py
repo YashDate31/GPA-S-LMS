@@ -683,6 +683,12 @@ class SyncManager:
             # Writing the remote id causes INSERT OR REPLACE to delete a different local row
             # that happened to have that id, silently destroying data.
             SKIP_COLS = {'id'}
+            # available_copies is a DERIVED column — always computed from borrow_records.
+            # NEVER pull it from Supabase. Supabase's value may be corrupted by old
+            # concurrent _push_to_cloud increment/decrement bugs (e.g. showing 18545
+            # for a book with 1 copy). Local recalculation at startup is the source of truth.
+            if table_name == 'books':
+                SKIP_COLS.add('available_copies')
             # Only include columns that actually exist locally (handles schema drift)
             local_cursor.execute(f"PRAGMA table_info({table_name})")
             local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
