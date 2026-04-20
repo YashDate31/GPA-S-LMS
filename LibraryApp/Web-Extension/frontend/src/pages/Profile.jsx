@@ -45,8 +45,16 @@ export default function Profile({ user }) {
         localStorage.removeItem(`profilePhoto_${user.enrollment_no}`);
     }
     
-    // Load photo from backend
-    setProfilePhoto(`/api/profile/photo?t=${new Date().getTime()}`);
+    // BUG 4 FIX: Don't unconditionally pre-set the backend URL (causes 404 flash
+    // for users with no photo). Use a HEAD request to check existence first,
+    // then set the URL only if the photo actually exists.
+    if (user?.enrollment_no) {
+        axios.head(`/api/profile/photo`)
+            .then(() => setProfilePhoto(`/api/profile/photo?t=${new Date().getTime()}`))
+            .catch(() => setProfilePhoto(null)); // Let the onError fallback handle it
+    } else {
+        setProfilePhoto(null);
+    }
     
     fetchPolicies();
     fetchDashboard();

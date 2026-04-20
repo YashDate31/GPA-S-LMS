@@ -24,7 +24,8 @@ const getCoverStyle = (title, isOverdue) => {
     return colors[index];
 };
 
-export default function MyBooks() {
+// BUG 5 FIX: Accept the 'user' prop that App.jsx passes — was silently discarded before
+export default function MyBooks({ user }) {
   const navigate = useNavigate();
   const [data, setData] = useState({ borrows: [], history: [] });
   const [loading, setLoading] = useState(true);

@@ -23,7 +23,7 @@ function AppRoutes({ user, setUser }) {
   const location = useLocation();
   
   return (
-    <Routes location={location} key={location.pathname}>
+    <Routes location={location}>
       <Route path="/login" element={!user ? <Login setUser={setUser} /> : <Navigate to="/" replace />} />
       <Route path="/register" element={!user ? <Register /> : <Navigate to="/" replace />} />
       
