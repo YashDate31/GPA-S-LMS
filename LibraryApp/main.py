@@ -5093,21 +5093,24 @@ Current Settings:
             return
 
         cards_data = [
-            ("📚 Total Books", stats['total_books'], self.colors['secondary']),
-            ("✅ Available Books", stats['available_books'], '#28a745'),
+            ("📚 Total Books", stats['total_titles'], self.colors['secondary']),
+            ("📦 Total Copies", stats['total_books'], '#8e44ad'),  # Purple for copies
+            ("✅ Available Copies", stats['available_books'], '#28a745'),
             ("📖 Issued Books", stats['borrowed_books'], '#ffc107'),
             ("👥 Total Students", stats['total_students'], '#17a2b8')
         ]
         
         for i, (title, value, color) in enumerate(cards_data):
             card = tk.Frame(parent, bg='white', relief='raised', bd=2)
-            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 15 if i < 3 else 0))
+            # Adjust padding based on position
+            pad_x = (0, 15 if i < len(cards_data) - 1 else 0)
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=pad_x)
             
             # Icon/Title
             title_label = tk.Label(
                 card,
                 text=title,
-                font=('Segoe UI', 12, 'bold'),
+                font=('Segoe UI', 11, 'bold'), # slightly smaller font to fit 5 cards
                 bg='white',
                 fg=self.colors['accent']
             )
@@ -5117,25 +5120,22 @@ Current Settings:
             value_label = tk.Label(
                 card,
                 text=str(value),
-                font=('Segoe UI', 28, 'bold'),
+                font=('Segoe UI', 24, 'bold'), # slightly smaller font to fit 5 cards
                 bg='white',
                 fg=color
             )
             value_label.pack(pady=(0, 15))
     
     def get_library_statistics(self):
-        """Get library statistics (helper for worker thread).
-
-        AUDIT FIX (Issue 7): Both 'total_books' and 'available_books' now use
-        SUM(…_copies) so they measure physical copies — not title count.
-        Mixing COUNT(*) (titles) with SUM(available_copies) (copies) in the
-        same dashboard created a semantic mismatch where adding multiple copies
-        of the same title inflated 'Available' without changing 'Total'.
-        """
+        """Get library statistics (helper for worker thread)."""
         conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
+
+            # Unique titles
+            cursor.execute("SELECT COUNT(*) FROM books")
+            total_titles = cursor.fetchone()[0]
 
             # Total *physical* copies across all titles
             cursor.execute("SELECT COALESCE(SUM(total_copies), 0) FROM books")
@@ -5162,6 +5162,7 @@ Current Settings:
             total_students = cursor.fetchone()[0]
 
             return {
+                'total_titles': total_titles,
                 'total_books': total_books,
                 'available_books': available_books,
                 'borrowed_books': borrowed_books,
@@ -5171,6 +5172,7 @@ Current Settings:
         except Exception as e:
             print(f"Error getting statistics: {e}")
             return {
+                'total_titles': 0,
                 'total_books': 0,
                 'available_books': 0,
                 'borrowed_books': 0,

@@ -713,6 +713,17 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
+            # First: fix total_copies from barcode (accession CSV is the source of truth)
+            cursor.execute("""
+                UPDATE books
+                SET total_copies = (
+                    LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1
+                )
+                WHERE barcode IS NOT NULL AND TRIM(barcode) != ''
+                AND total_copies != (LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1)
+            """)
+            conn.commit()
+
             cursor.execute("""
                 UPDATE books
                 SET available_copies = total_copies - COALESCE((
