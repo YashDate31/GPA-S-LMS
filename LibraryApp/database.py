@@ -246,6 +246,7 @@ class Database:
                 date_added DATE DEFAULT CURRENT_DATE,
                 barcode TEXT,
                 price REAL DEFAULT 0,
+                cover_url TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''', sqlite_sql='''
@@ -261,6 +262,7 @@ class Database:
                 date_added DATE DEFAULT CURRENT_DATE,
                 barcode TEXT,
                 price REAL DEFAULT 0,
+                cover_url TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -557,6 +559,27 @@ class Database:
         except Exception as e:
             print(f"Migration check warning (price): {e}")
 
+        # Migration: ensure cover_url column exists on books
+        try:
+            has_cover = False
+            if self.use_cloud:
+                cursor.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name='books' AND column_name='cover_url'"
+                )
+                if cursor.fetchone():
+                    has_cover = True
+            else:
+                cursor.execute("PRAGMA table_info(books)")
+                columns = [col[1] for col in cursor.fetchall()]
+                has_cover = 'cover_url' in columns
+
+            if not has_cover:
+                cursor.execute("ALTER TABLE books ADD COLUMN cover_url TEXT")
+                conn.commit()
+                print("Migration: Added 'cover_url' column to books table")
+        except Exception as e:
+            print(f"Migration check warning (cover_url): {e}")
+
         # Migration: ensure updated_at exists on tables used for delta sync
         for table_name in ('students', 'books', 'borrow_records', 'promotion_history', 'academic_years'):
             try:
@@ -754,7 +777,7 @@ class Database:
         finally:
             conn.close()
     
-    def add_book(self, book_id, title, author='', isbn='', category='', total_copies=1, barcode='', price=0.0):
+    def add_book(self, book_id, title, author='', isbn='', category='', total_copies=1, barcode='', price=0.0, cover_url=None):
         """Add a new book to the database"""
         # Validate required fields
         if not book_id or not book_id.strip():
@@ -767,9 +790,9 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute('''
-                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0))
+                INSERT INTO books (book_id, title, author, isbn, category, total_copies, available_copies, barcode, price, cover_url, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (book_id, title, author, isbn, category, total_copies, total_copies, barcode or None, price or 0, cover_url))
             conn.commit()
             # NOTE: No immediate _push_to_cloud here.
             # Bug fix: _push_to_cloud + SyncManager writing simultaneously caused race-condition
@@ -783,7 +806,7 @@ class Database:
         finally:
             conn.close()
     
-    def update_book(self, book_id, title, author, isbn='', category='', total_copies=1, barcode='', price=0.0):
+    def update_book(self, book_id, title, author, isbn='', category='', total_copies=1, barcode='', price=0.0, cover_url=None):
         """Update an existing book's information"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -807,9 +830,9 @@ class Database:
             # Update book information
             cursor.execute('''
                 UPDATE books 
-                SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP
+                SET title=?, author=?, isbn=?, category=?, total_copies=?, available_copies=?, barcode=?, price=?, cover_url=?, updated_at=CURRENT_TIMESTAMP
                 WHERE book_id=?
-            ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, book_id))
+            ''', (title, author, isbn, category, total_copies, new_available, barcode or None, price or 0, cover_url, book_id))
             conn.commit()
             # NOTE: No immediate _push_to_cloud here (Bug 2 fix — see add_book).
             # SyncManager will sync the update in the next periodic cycle.
