@@ -308,10 +308,11 @@ def add_demo_admin_activity(db):
     try:
         cursor.execute('''CREATE TABLE IF NOT EXISTS admin_activity (
             id SERIAL PRIMARY KEY,
-            timestamp TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             action TEXT NOT NULL,
             details TEXT,
-            admin_user TEXT
+            admin_user TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.commit()
     except:

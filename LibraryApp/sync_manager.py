@@ -570,10 +570,13 @@ class SyncManager:
 
                     payload_vals = [row_dict[c] for c in payload_columns]
 
+                    # Normalize book_id in payload if present
+                    if 'book_id' in payload_columns:
+                        b_idx = payload_columns.index('book_id')
+                        if payload_vals[b_idx] is not None:
+                            payload_vals[b_idx] = str(payload_vals[b_idx]).replace(' ', '')
+
                     # Fix 1: Backfill NULL updated_at before pushing to Supabase.
-                    # A row with NULL updated_at would be re-fetched on every remote→local
-                    # cycle because the old query used "updated_at IS NULL OR updated_at > ?".
-                    # Even with that clause removed, stamping here keeps cloud data clean.
                     if 'updated_at' in payload_columns:
                         idx = payload_columns.index('updated_at')
                         if payload_vals[idx] is None:
@@ -715,8 +718,14 @@ class SyncManager:
                             continue
                         # Bug 2 fix: normalize book_id whitespace so "8264, 8266" matches "8264,8266"
                         # Non-contiguous accession ranges may have spaces after commas depending on origin
-                        if table_name == 'books':
+                        if table_name in ('books', 'borrow_records'):
                             key_vals = [str(v).replace(' ', '') if v is not None else v for v in key_vals]
+                        
+                        # Normalize payload values too so they are saved clean
+                        if 'book_id' in payload_columns:
+                            b_idx = payload_columns.index('book_id')
+                            if payload_vals[b_idx] is not None:
+                                payload_vals[b_idx] = str(payload_vals[b_idx]).replace(' ', '')
 
                         where_clause = ' AND '.join([f"{k} = ?" for k in natural_key])
 
@@ -1192,7 +1201,7 @@ class SyncManager:
                 if any(v is None for v in key_vals):
                     continue
                 # Normalize book_id whitespace
-                if table_name == 'books':
+                if table_name in ('books', 'borrow_records'):
                     key_vals = [str(v).replace(' ', '') if v is not None else v for v in key_vals]
 
                 where = ' AND '.join([f"{k} = ?" for k in natural_key])
@@ -1200,6 +1209,11 @@ class SyncManager:
                 exists = local_cursor.fetchone()
 
                 payload_vals = [row_dict.get(c) for c in payload_columns]
+                # Normalize payload book_id to ensure clean storage
+                if 'book_id' in payload_columns:
+                    b_idx = payload_columns.index('book_id')
+                    if payload_vals[b_idx] is not None:
+                        payload_vals[b_idx] = str(payload_vals[b_idx]).replace(' ', '')
                 if exists:
                     update_cols = [c for c in payload_columns if c not in natural_key]
                     if update_cols:

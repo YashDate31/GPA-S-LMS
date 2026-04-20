@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 #yashdate
 """
 GPA's Library Management System
@@ -3413,10 +3413,11 @@ Government Polytechnic Awasari (Kh)"""
             try:
                 c.execute('''CREATE TABLE IF NOT EXISTS admin_activity (
                     id SERIAL PRIMARY KEY,
-                    timestamp TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     action TEXT NOT NULL,
                     details TEXT,
-                    admin_user TEXT
+                    admin_user TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )''')
                 conn.commit()
             except:
@@ -3799,10 +3800,11 @@ Government Polytechnic Awasari (Kh)"""
             try:
                 c.execute('''CREATE TABLE IF NOT EXISTS admin_activity (
                     id SERIAL PRIMARY KEY,
-                    timestamp TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     action TEXT NOT NULL,
                     details TEXT,
-                    admin_user TEXT
+                    admin_user TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )''')
                 conn.commit()
             except:
