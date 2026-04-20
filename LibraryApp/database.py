@@ -1039,21 +1039,45 @@ class Database:
                 cursor.execute('ROLLBACK')
                 return False, "Invalid return date format"
 
-            # Resolve book_id: support single accession number OR range string
-            real_book_id = self._resolve_book_id(cursor, book_id)
-            if not real_book_id:
-                cursor.execute('ROLLBACK')
-                return False, f"Book not found (ID: {book_id})"
-            book_id = real_book_id  # use stored key for all subsequent queries
+            # --- Return-by-accession resolution ---
+            # The user may type an accession number (e.g. "5") that _resolve_book_id maps to
+            # a completely different book range (e.g. "5-24"), while the actual borrow record
+            # stores book_id="41-42" with accession_no="5". We must check the borrow table
+            # first by accession_no before falling back to the resolved book_id.
+            original_input = str(book_id).strip()
+
+            # Try to find an active borrow record by accession_no directly
+            cursor.execute(
+                "SELECT book_id, due_date FROM borrow_records WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'",
+                (enrollment_no, original_input)
+            )
+            accs_row = cursor.fetchone()
+
+            if accs_row:
+                # Found by accession number — use the book_id stored in the borrow record
+                book_id = accs_row[0]
+                accs_due_date = accs_row[1]
+            else:
+                # Fall back: resolve via book range / direct book_id lookup
+                real_book_id = self._resolve_book_id(cursor, original_input)
+                if not real_book_id:
+                    cursor.execute('ROLLBACK')
+                    return False, f"Book not found (ID: {original_input})"
+                book_id = real_book_id
+                # Look up due date via book_id
+                cursor.execute(
+                    "SELECT due_date FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
+                    (enrollment_no, book_id)
+                )
+                fb_row = cursor.fetchone()
+                accs_due_date = fb_row[0] if fb_row else None
 
             # Calculate fine if overdue
+            import os
             fine_amount = 0
-            cursor.execute("SELECT due_date FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'", (enrollment_no, book_id))
-            record = cursor.fetchone()
-            if record and record[0]:
+            if accs_due_date:
                 try:
-                    import os
-                    due_dt = datetime.strptime(record[0], '%Y-%m-%d')
+                    due_dt = datetime.strptime(accs_due_date, '%Y-%m-%d')
                     ret_dt = datetime.strptime(return_date, '%Y-%m-%d')
                     days_late = (ret_dt - due_dt).days
                     if days_late > 0:
@@ -1062,12 +1086,21 @@ class Database:
                 except Exception as e:
                     print(f"Error calculating fine during return: {e}")
 
-            cursor.execute('''
-                UPDATE borrow_records 
-                SET return_date = ?, status = 'returned', fine = ?, updated_at=CURRENT_TIMESTAMP
-                WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
-            ''', (return_date, fine_amount, enrollment_no, book_id))
-            
+            # Update the borrow record — match by (enrollment_no, book_id) OR also try accession_no
+            if accs_row:
+                # Matched by accession_no: update that specific record
+                cursor.execute('''
+                    UPDATE borrow_records
+                    SET return_date = ?, status = 'returned', fine = ?, updated_at=CURRENT_TIMESTAMP
+                    WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'
+                ''', (return_date, fine_amount, enrollment_no, original_input))
+            else:
+                cursor.execute('''
+                    UPDATE borrow_records 
+                    SET return_date = ?, status = 'returned', fine = ?, updated_at=CURRENT_TIMESTAMP
+                    WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
+                ''', (return_date, fine_amount, enrollment_no, book_id))
+
             if cursor.rowcount == 0:
                 cursor.execute('ROLLBACK')
                 return False, "No active borrowing record found"
