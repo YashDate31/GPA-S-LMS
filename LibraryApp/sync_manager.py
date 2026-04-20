@@ -870,10 +870,6 @@ class SyncManager:
                 unique_key_cols = ['book_id', 'enrollment_no']
             elif table_name == 'notices':
                 unique_key_cols = ['title', 'created_at']
-            elif table_name == 'book_wishlist':
-                unique_key_cols = ['book_id', 'enrollment_no']
-            elif table_name == 'book_ratings':
-                unique_key_cols = ['book_id', 'enrollment_no']
             else:
                 unique_key_cols = ['created_at']  # Fallback
             

@@ -1639,19 +1639,45 @@ def api_update_settings():
     if 'student_id' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
         
-    data = request.json
+    data = request.json or {}
     enrollment = session['student_id']
-    email = data.get('email')
-    library_alerts = 1 if data.get('libraryAlerts') else 0
-    loan_reminders = 1 if data.get('loanReminders') else 0
-    theme = data.get('theme', 'light') # 'light' or 'dark'
-    language = data.get('language', 'English')
-    data_consent = 1 if data.get('dataConsent') else 0
-    
+
     conn = get_portal_db()
     cursor = conn.cursor()
-    
-    # Upsert Settings
+
+    # BUG A5 FIX: Only update fields that are explicitly present in the request.
+    # A partial payload (e.g. just {theme: 'dark'} from the dark mode toggle) was
+    # previously overwriting ALL columns with falsy defaults, zeroing out the user's
+    # email, notification prefs, and data consent on every toggle.
+    #
+    # Strategy: read current row first, merge with incoming fields, then upsert.
+    cursor.execute("SELECT * FROM user_settings WHERE enrollment_no = ?", (enrollment,))
+    existing = cursor.fetchone()
+
+    # Build merged field set — start from existing values (or safe defaults)
+    if existing:
+        cur_email        = existing['email']
+        cur_alerts       = existing['library_alerts']
+        cur_reminders    = existing['loan_reminders']
+        cur_theme        = existing['theme']
+        cur_language     = existing['language']
+        cur_consent      = existing['data_consent']
+    else:
+        cur_email        = None
+        cur_alerts       = 1
+        cur_reminders    = 1
+        cur_theme        = 'light'
+        cur_language     = 'English'
+        cur_consent      = 1
+
+    # Only override a field if the key is present in the incoming payload
+    new_email     = data['email']        if 'email'         in data else cur_email
+    new_alerts    = (1 if data['libraryAlerts'] else 0) if 'libraryAlerts' in data else cur_alerts
+    new_reminders = (1 if data['loanReminders'] else 0) if 'loanReminders' in data else cur_reminders
+    new_theme     = data['theme']        if 'theme'         in data else cur_theme
+    new_language  = data['language']     if 'language'      in data else cur_language
+    new_consent   = (1 if data['dataConsent'] else 0) if 'dataConsent' in data else cur_consent
+
     cursor.execute("""
         INSERT INTO user_settings (enrollment_no, email, library_alerts, loan_reminders, theme, language, data_consent)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1662,8 +1688,8 @@ def api_update_settings():
             theme=excluded.theme,
             language=excluded.language,
             data_consent=excluded.data_consent
-    """, (enrollment, email, library_alerts, loan_reminders, theme, language, data_consent))
-    
+    """, (enrollment, new_email, new_alerts, new_reminders, new_theme, new_language, new_consent))
+
     conn.commit()
     conn.close()
     
@@ -1700,8 +1726,12 @@ def api_profile_photo():
         for old_ext in ['.jpg', '.jpeg', '.png']:
             old_path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{old_ext}")
             if os.path.exists(old_path):
-                try: os.remove(old_path)
-                except: pass
+                try:
+                    os.remove(old_path)
+                except OSError as e:
+                    # BUG A2 FIX: Log instead of silently swallowing — a stale photo
+                    # file left on disk means the old extension wins on next login.
+                    print(f"[Profile Photo] Failed to remove old photo {old_path}: {e}")
 
         # Save new photo
         save_path = os.path.join(PROFILE_PHOTO_FOLDER, f"{enrollment}{ext}")
@@ -1717,7 +1747,9 @@ def api_profile_photo():
                 try: 
                     os.remove(old_path)
                     deleted = True
-                except: pass
+                except OSError as e:
+                    # BUG A2 FIX: Log removal failures on DELETE too
+                    print(f"[Profile Photo] Failed to remove photo {old_path}: {e}")
         return jsonify({'status': 'success', 'message': 'Profile photo removed'}) if deleted else jsonify({'error': 'No photo found'}), 404
 
     conn = get_portal_db()
@@ -2047,7 +2079,7 @@ def api_me():
             'department': student['department'],
             'year': student_year,
             'email': user_email,
-            'phone': dict(student).get('phone', 'N/A'),
+            'phone': student['phone'] or 'N/A',  # BUG A6 FIX: None → 'N/A'
             'settings': {
                 'libraryAlerts': bool(settings['library_alerts']) if settings else False,
                 'loanReminders': bool(settings['loan_reminders']) if settings else True,
