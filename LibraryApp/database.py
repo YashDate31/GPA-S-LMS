@@ -1003,11 +1003,15 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year))
             
-            # Update available copies
+            # Update available copies — guard ensures atomic check-and-decrement
+            # even if two threads passed the availability check simultaneously.
             cursor.execute('''
                 UPDATE books SET available_copies = available_copies - 1, updated_at=CURRENT_TIMESTAMP 
-                WHERE book_id = ?
+                WHERE book_id = ? AND available_copies > 0
             ''', (book_id,))
+            if cursor.rowcount == 0:
+                cursor.execute('ROLLBACK')
+                return False, "Book not available (concurrent reservation detected)"
             
             cursor.execute('COMMIT')
             return True, "Book borrowed successfully"
@@ -1105,11 +1109,12 @@ class Database:
                 cursor.execute('ROLLBACK')
                 return False, "No active borrowing record found"
             
-            # Update available copies
+            # Update available copies — guard prevents exceeding total_copies
             cursor.execute('''
                 UPDATE books SET available_copies = available_copies + 1, updated_at=CURRENT_TIMESTAMP 
-                WHERE book_id = ?
+                WHERE book_id = ? AND available_copies < total_copies
             ''', (book_id,))
+            # Note: if rowcount is 0 (already at max), it's a data integrity issue — proceed anyway
             
             cursor.execute('COMMIT')
 

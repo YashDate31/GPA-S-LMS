@@ -180,6 +180,7 @@ class LibraryApp:
     def _fetch_analysis_data(self, days=30, enrollment_no=None, book_id=None, branch=None):
         """Fetch all analysis data in a background thread. Supports branch filter."""
         data = {}
+        conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
@@ -358,11 +359,16 @@ class LibraryApp:
                 names['book_title'] = res[0] if res else None
             data['filter_names'] = names
 
-            conn.close()
             return data
         except Exception as e:
             print(f"Data fetch error: {e}")
             return e
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def import_students_excel_new(self):
         """Import students from Excel with year selection (robust new workflow)."""
@@ -2035,14 +2041,11 @@ Government Polytechnic Awasari (Kh)"""
                 # Send email (no attachment for reminders)
                 success, message = self.send_email_with_attachment(email, subject, body, None)
                 
-                # Log attempt
-                self.log_email_history(
-                    enrollment,
-                    name,
-                    email,
-                    book_title,
-                    success,
-                    "" if success else message
+                # Log attempt via admin activity (log_email_history is not defined; use admin log instead)
+                status_str = "OK" if success else f"FAILED: {message}"
+                self._log_admin_activity(
+                    "Reminder Email",
+                    f"To {name} ({email}) for '{book_title}' — {status_str}"
                 )
                 
                 if success:
@@ -2081,11 +2084,16 @@ Government Polytechnic Awasari (Kh)"""
         
         progress.update()
         
-        # Run check in background
+        # Run check in background (MUST NOT call messagebox from background thread — use root.after)
         def run_check():
             self.check_and_send_reminders()
-            progress.destroy()
-            messagebox.showinfo("Reminders Sent", "Reminder emails have been sent to students with books due soon.\n\nCheck the Email History tab for details.")
+            def _on_done():
+                try:
+                    progress.destroy()
+                except Exception:
+                    pass
+                messagebox.showinfo("Reminders Sent", "Reminder emails have been sent to students with books due soon.\n\nCheck the Email History tab for details.")
+            self.root.after(0, _on_done)
         
         thread = threading.Thread(target=run_check, daemon=True)
         thread.start()
@@ -5116,49 +5124,65 @@ Current Settings:
             value_label.pack(pady=(0, 15))
     
     def get_library_statistics(self):
-        """Get library statistics (helper for worker thread)"""
+        """Get library statistics (helper for worker thread).
+
+        AUDIT FIX (Issue 7): Both 'total_books' and 'available_books' now use
+        SUM(…_copies) so they measure physical copies — not title count.
+        Mixing COUNT(*) (titles) with SUM(available_copies) (copies) in the
+        same dashboard created a semantic mismatch where adding multiple copies
+        of the same title inflated 'Available' without changing 'Total'.
+        """
         conn = None
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
-            
-            # Total books
-            cursor.execute("SELECT COUNT(*) FROM books")
+
+            # Total *physical* copies across all titles
+            cursor.execute("SELECT COALESCE(SUM(total_copies), 0) FROM books")
             total_books = cursor.fetchone()[0]
-            
-            # Available books (sum of available_copies)
-            cursor.execute("SELECT SUM(available_copies) FROM books")
-            available_books = cursor.fetchone()[0] or 0
-            
-            # Borrowed books
+
+            # Available physical copies (books not currently issued)
+            cursor.execute("SELECT COALESCE(SUM(available_copies), 0) FROM books")
+            available_books = cursor.fetchone()[0]
+
+            # Currently issued (active borrows)
             cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE status = 'borrowed'")
             borrowed_books = cursor.fetchone()[0]
-            
+
+            # Overdue books (still out past due date)
+            today = datetime.now().strftime('%Y-%m-%d')
+            cursor.execute(
+                "SELECT COUNT(*) FROM borrow_records WHERE status = 'borrowed' AND due_date < ?",
+                (today,)
+            )
+            overdue_books = cursor.fetchone()[0]
+
             # Total students
             cursor.execute("SELECT COUNT(*) FROM students")
             total_students = cursor.fetchone()[0]
-            
-            conn.close()
-            
+
             return {
                 'total_books': total_books,
                 'available_books': available_books,
                 'borrowed_books': borrowed_books,
+                'overdue_books': overdue_books,
                 'total_students': total_students
             }
         except Exception as e:
             print(f"Error getting statistics: {e}")
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
             return {
                 'total_books': 0,
                 'available_books': 0,
                 'borrowed_books': 0,
+                'overdue_books': 0,
                 'total_students': 0
             }
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     
     def create_students_tab(self):
         """Create students management tab"""
@@ -5572,28 +5596,40 @@ Current Settings:
                 bg=self.colors['primary'], 
                 fg=self.colors['accent']).pack(anchor='w', pady=(0, 8))
         
-        # Autocomplete cache to avoid hitting DB on every keystroke
+        # Autocomplete cache to avoid hitting DB on every keystroke.
+        # AUDIT FIX (Issue 10): Cache stores plain dicts, NOT sqlite3.Row objects.
+        # sqlite3.Row objects reference the underlying C cursor state and can become
+        # undefined once the DB connection is closed. Converting to dict immediately
+        # after fetch makes the cached data independent of the connection lifetime.
         import time as _time
         _ac_cache = {'students': None, 'students_ts': 0, 'books': None, 'books_ts': 0}
         _AC_CACHE_TTL = 30  # seconds
+
+        def _rows_to_dicts(rows):
+            """Convert sqlite3.Row list → plain dict list for safe long-lived caching."""
+            try:
+                return [dict(r) for r in rows]
+            except Exception:
+                return list(rows)
 
         # Autocomplete for student enrollment
         def get_student_suggestions(query):
             try:
                 now = _time.time()
                 if _ac_cache['students'] is None or (now - _ac_cache['students_ts']) > _AC_CACHE_TTL:
-                    _ac_cache['students'] = self.db.get_students()
+                    _ac_cache['students'] = _rows_to_dicts(self.db.get_students())
                     _ac_cache['students_ts'] = now
                 students = _ac_cache['students']
                 matches = []
                 query_lower = query.lower()
                 for s in students:
-                    enrollment = str(s['enrollment']).lower()
-                    name = str(s['name']).lower()
+                    enrollment = str(s.get('enrollment_no', s.get('enrollment', ''))).lower()
+                    name = str(s.get('name', '')).lower()
                     if query_lower in enrollment or query_lower in name:
                         matches.append(s)
                 return matches[:10]  # Limit to 10 suggestions
-            except:
+            except Exception as e:
+                print(f"[Autocomplete] Student suggestion error: {e}")
                 return []
         
         def format_student_display(student):
@@ -5631,20 +5667,21 @@ Current Settings:
             try:
                 now = _time.time()
                 if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
-                    _ac_cache['books'] = self.db.get_books()
+                    _ac_cache['books'] = _rows_to_dicts(self.db.get_books())
                     _ac_cache['books_ts'] = now
                 books = _ac_cache['books']
                 matches = []
                 query_lower = query.lower()
                 for b in books:
-                    book_id = str(b['book_id']).lower()
-                    title = str(b['title']).lower()
-                    author = str(b['author']).lower()
-                    barcode = str(b['barcode'] if b['barcode'] else '').lower()
+                    book_id = str(b.get('book_id', '')).lower()
+                    title = str(b.get('title', '')).lower()
+                    author = str(b.get('author', '')).lower()
+                    barcode = str(b.get('barcode') or '').lower()
                     if query_lower in book_id or query_lower in title or query_lower in author or query_lower in barcode:
                         matches.append(b)
                 return matches[:10]
-            except:
+            except Exception as e:
+                print(f"[Autocomplete] Book suggestion error: {e}")
                 return []
         
         def format_book_display(book):
@@ -5656,14 +5693,14 @@ Current Settings:
             if event.keysym == 'Return':
                 query = self.borrow_book_id_entry.get().strip()
                 if query:
-                    # Use cached books if available
+                    # Use cached books (plain dicts) if available
                     now = _time.time()
                     if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
-                        _ac_cache['books'] = self.db.get_books()
+                        _ac_cache['books'] = _rows_to_dicts(self.db.get_books())
                         _ac_cache['books_ts'] = now
                     books = _ac_cache['books']
                     for b in books:
-                        barcode = str(b['barcode'] if b['barcode'] else '')
+                        barcode = str(b.get('barcode') or '')
                         if barcode and barcode.lower() == query.lower():
                             # Found barcode match - auto-fill with book_id
                             self.borrow_book_id_entry.delete(0, tk.END)
@@ -5833,18 +5870,19 @@ Current Settings:
             try:
                 now = _time.time()
                 if _ac_cache['students'] is None or (now - _ac_cache['students_ts']) > _AC_CACHE_TTL:
-                    _ac_cache['students'] = self.db.get_students()
+                    _ac_cache['students'] = _rows_to_dicts(self.db.get_students())
                     _ac_cache['students_ts'] = now
                 students = _ac_cache['students']
                 matches = []
                 query_lower = query.lower()
                 for s in students:
-                    enrollment = str(s['enrollment']).lower()
-                    name = str(s['name']).lower()
+                    enrollment = str(s.get('enrollment_no', s.get('enrollment', ''))).lower()
+                    name = str(s.get('name', '')).lower()
                     if query_lower in enrollment or query_lower in name:
                         matches.append(s)
                 return matches[:10]
-            except:
+            except Exception as e:
+                print(f"[Autocomplete] Return student suggestion error: {e}")
                 return []
         
         def format_return_student_display(student):
@@ -5881,20 +5919,21 @@ Current Settings:
             try:
                 now = _time.time()
                 if _ac_cache['books'] is None or (now - _ac_cache['books_ts']) > _AC_CACHE_TTL:
-                    _ac_cache['books'] = self.db.get_books()
+                    _ac_cache['books'] = _rows_to_dicts(self.db.get_books())
                     _ac_cache['books_ts'] = now
                 books = _ac_cache['books']
                 matches = []
                 query_lower = query.lower()
                 for b in books:
-                    book_id = str(b['book_id']).lower()
-                    title = str(b['title']).lower()
-                    author = str(b['author']).lower()
-                    barcode = str(b['barcode'] if b['barcode'] else '').lower()
+                    book_id = str(b.get('book_id', '')).lower()
+                    title = str(b.get('title', '')).lower()
+                    author = str(b.get('author', '')).lower()
+                    barcode = str(b.get('barcode') or '').lower()
                     if query_lower in book_id or query_lower in title or query_lower in author or query_lower in barcode:
                         matches.append(b)
                 return matches[:10]
-            except:
+            except Exception as e:
+                print(f"[Autocomplete] Return book suggestion error: {e}")
                 return []
         
         def format_return_book_display(book):
@@ -6527,16 +6566,21 @@ Current Settings:
             "Cybersecurity", "IoT", "Competitive Programming", "Project Guides", "Others"
         ]
         
-        # Form fields
+        # Form fields — use named key access (not integer index) to guard against schema column order changes
+        def _bkey(key, default=''):
+            try:
+                return book[key] if book[key] is not None else default
+            except (IndexError, KeyError):
+                return default
         fields = [
-            ("Book ID:", "book_id", book[1], False),  # Read-only
-            ("Title:", "title", book[2], True),
-            ("Author:", "author", book[3], True),
-            ("ISBN:", "isbn", book[4] or '', True),
-            ("Category:", "category", book[5] or 'Others', True),
-            ("Total Copies:", "total_copies", str(book[6]), True),
-            ("Available Copies:", "available_copies", str(book[7]), False),  # Read-only (calculated)
-            ("Barcode:", "barcode", book[9] if len(book) > 9 and book[9] else '', True)
+            ("Book ID:", "book_id", _bkey('book_id'), False),  # Read-only
+            ("Title:", "title", _bkey('title'), True),
+            ("Author:", "author", _bkey('author'), True),
+            ("ISBN:", "isbn", _bkey('isbn'), True),
+            ("Category:", "category", _bkey('category') or 'Others', True),
+            ("Total Copies:", "total_copies", str(_bkey('total_copies', 1)), True),
+            ("Available Copies:", "available_copies", str(_bkey('available_copies', 0)), False),  # Read-only
+            ("Barcode:", "barcode", _bkey('barcode'), True)
         ]
         
         entries = {}
@@ -11405,7 +11449,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         df = df_raw
 
                     sheet_cols_lower = [str(c).strip().lower() for c in df.columns]
-
+ 
                     # Detect format
                     is_bookbank = ('book name' in sheet_cols_lower or
                                    'accession no' in sheet_cols_lower or
@@ -11584,11 +11628,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                 union_acc.sort()
                             new_barcode = ','.join(union_acc)
 
-                            new_total = max(ex_total, len(union_acc))
+                            # BUG-FIX: Trust accession list as ground truth for copy count.
+                            # Using max(ex_total, len(union_acc)) would prevent fixing a corrupted ex_total
+                            # (e.g. if ex_total was erroneously set to 18000, max() would keep it forever).
+                            new_total = len(union_acc)
                         else:
-                            # Idempotent behavior when we don't have per-copy IDs: treat import as ABSOLUTE
+                            # No per-copy accession IDs available: use incoming value as authoritative
+                            # (don't use max() here either — if copies_val is sane and ex_total is not, fix it)
                             new_barcode = ex_barcode or ''
-                            new_total = max(ex_total, copies_val)
+                            new_total = copies_val if copies_val > 0 else ex_total
 
                         issued = max(ex_total - ex_avail, 0)
                         new_avail = max(new_total - issued, 0)
