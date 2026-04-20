@@ -225,6 +225,11 @@ class SyncManager:
                 return results
 
             local_conn = sqlite3.connect(self.local_db_path)
+            # Enable WAL so the sync thread (long-lived connection) doesn't block
+            # the UI thread's short read/write connections during book issue/return.
+            local_conn.execute('PRAGMA journal_mode=WAL')
+            local_conn.execute('PRAGMA busy_timeout = 10000')  # 10s retry
+            local_conn.row_factory = sqlite3.Row
             # Fast failure on network problems + keepalive for unstable links
             remote_conn = psycopg2.connect(
                 self.remote_config,
@@ -716,10 +721,15 @@ class SyncManager:
                         # Skip rows with NULL in any natural key field
                         if any(v is None for v in key_vals):
                             continue
-                        # Bug 2 fix: normalize book_id whitespace so "8264, 8266" matches "8264,8266"
-                        # Non-contiguous accession ranges may have spaces after commas depending on origin
-                        if table_name in ('books', 'borrow_records'):
-                            key_vals = [str(v).replace(' ', '') if v is not None else v for v in key_vals]
+                        # Bug 4 fix: only normalize whitespace on book_id specifically.
+                        # Stripping spaces from ALL key columns (enrollment_no, borrow_date)
+                        # is harmless but stripping from book_id in the WHERE clause while
+                        # not doing so consistently in payload causes zero-match lookups that
+                        # re-insert as duplicates instead of updating the existing record.
+                        if table_name in ('books', 'borrow_records') and 'book_id' in natural_key:
+                            bk_key_idx = list(natural_key).index('book_id')
+                            if key_vals[bk_key_idx] is not None:
+                                key_vals[bk_key_idx] = str(key_vals[bk_key_idx]).replace(' ', '')
                         
                         # Normalize payload values too so they are saved clean
                         if 'book_id' in payload_columns:
@@ -1293,7 +1303,9 @@ class SyncManager:
             try:
                 if psycopg2 is None:
                     raise RuntimeError("psycopg2 not installed")
-                local_conn = sqlite3.connect(self.local_db_path)
+                local_conn = sqlite3.connect(self.local_db_path, timeout=30)
+                local_conn.execute('PRAGMA journal_mode=WAL')
+                local_conn.execute('PRAGMA busy_timeout = 10000')
                 remote_conn = psycopg2.connect(
                     self.remote_config,
                     connect_timeout=8, keepalives=1,
