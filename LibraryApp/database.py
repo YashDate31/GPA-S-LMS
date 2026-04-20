@@ -930,21 +930,29 @@ class Database:
         due_date: string YYYY-MM-DD
         """
         conn = self.get_connection()
+        # Fix: explicitly manage transactions using BEGIN IMMEDIATE to prevent WAL deadlocks
+        # with background SyncManager threads holding SHARED locks.
+        conn.isolation_level = None 
         cursor = conn.cursor()
         try:
+            cursor.execute('BEGIN IMMEDIATE')
+
             # Check student's eligibility: Pass Out students cannot borrow
             cursor.execute('SELECT year FROM students WHERE enrollment_no = ?', (enrollment_no,))
             srow = cursor.fetchone()
             if not srow:
+                cursor.execute('ROLLBACK')
                 return False, "Student not found"
             year_val = (srow[0] or '').strip().lower()
             if year_val in ("pass out", "passout"):
+                cursor.execute('ROLLBACK')
                 return False, "Pass Out students cannot borrow books"
 
             # Resolve book_id: support single accession number OR range string
             original_book_id = str(book_id).strip()  # remember original input for display
             real_book_id = self._resolve_book_id(cursor, book_id)
             if not real_book_id:
+                cursor.execute('ROLLBACK')
                 return False, f"Book not found (ID: {book_id})"
             book_id = real_book_id  # use the stored key for all subsequent queries
 
@@ -952,6 +960,7 @@ class Database:
             cursor.execute('SELECT available_copies FROM books WHERE book_id = ?', (book_id,))
             result = cursor.fetchone()
             if not result or result[0] <= 0:
+                cursor.execute('ROLLBACK')
                 return False, "Book not available"
 
             # Check if this student already has this exact copy borrowed (not yet returned)
@@ -960,17 +969,15 @@ class Database:
                 (enrollment_no, original_book_id)
             )
             if cursor.fetchone()[0] > 0:
+                cursor.execute('ROLLBACK')
                 return False, "This student already has this exact copy borrowed. It must be returned before borrowing again."
             
             # Check max books per student limit (enforced at database level for consistency)
             cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'", (enrollment_no,))
             current_books = cursor.fetchone()[0]
-            # Note: max_books limit is enforced in UI layer with configurable settings
-            # Database allows up to reasonable limit (e.g., 20) for flexibility
             if current_books >= 20:
+                cursor.execute('ROLLBACK')
                 return False, f"Maximum borrow limit reached ({current_books} books currently borrowed)"
-            
-            # Student existence implicitly checked above
             
             # Validate provided dates
             try:
@@ -978,10 +985,13 @@ class Database:
                 dd_obj = datetime.strptime(due_date, '%Y-%m-%d')
                 diff_days = (dd_obj - bd_obj).days
                 if diff_days < 0:
+                    cursor.execute('ROLLBACK')
                     return False, "Due date cannot be before borrow date"
                 if diff_days < 1 or diff_days > 30:
+                    cursor.execute('ROLLBACK')
                     return False, "Loan period must be between 1 and 30 days"
             except ValueError:
+                cursor.execute('ROLLBACK')
                 return False, "Invalid date format (expected YYYY-MM-DD)"
 
             # Get active academic year
@@ -999,15 +1009,13 @@ class Database:
                 WHERE book_id = ?
             ''', (book_id,))
             
-            conn.commit()
-            # NOTE: No immediate _push_to_cloud for borrow records.
-            # Bug fix (Bug 1 + Bug 2): borrow_book was pushing without 'id', so Supabase
-            # auto-assigned a SERIAL id (e.g. 25). Then SyncManager synced with ON CONFLICT (id=5)
-            # from SQLite → Supabase found no row with id=5 → inserted a second row.
-            # Removing this push so ONLY SyncManager writes borrow_records to Supabase,
-            # using the natural key (enrollment_no, book_id, borrow_date).
+            cursor.execute('COMMIT')
             return True, "Book borrowed successfully"
         except Exception as e:
+            try:
+                cursor.execute('ROLLBACK')
+            except Exception:
+                pass
             return False, f"Error: {str(e)}"
         finally:
             conn.close()
@@ -1017,19 +1025,24 @@ class Database:
         return_date: optional string YYYY-MM-DD; if None uses today.
         """
         conn = self.get_connection()
+        conn.isolation_level = None
         cursor = conn.cursor()
         try:
+            cursor.execute('BEGIN IMMEDIATE')
+
             if return_date is None or not return_date.strip():
                 return_date = datetime.now().strftime('%Y-%m-%d')
             # Validate date format
             try:
                 datetime.strptime(return_date, '%Y-%m-%d')
             except ValueError:
+                cursor.execute('ROLLBACK')
                 return False, "Invalid return date format"
 
             # Resolve book_id: support single accession number OR range string
             real_book_id = self._resolve_book_id(cursor, book_id)
             if not real_book_id:
+                cursor.execute('ROLLBACK')
                 return False, f"Book not found (ID: {book_id})"
             book_id = real_book_id  # use stored key for all subsequent queries
 
@@ -1056,6 +1069,7 @@ class Database:
             ''', (return_date, fine_amount, enrollment_no, book_id))
             
             if cursor.rowcount == 0:
+                cursor.execute('ROLLBACK')
                 return False, "No active borrowing record found"
             
             # Update available copies
@@ -1064,19 +1078,24 @@ class Database:
                 WHERE book_id = ?
             ''', (book_id,))
             
-            conn.commit()
-            # NOTE: No immediate _push_to_cloud for return records (Bug 2 fix — see borrow_book).
-            # SyncManager will sync the status='returned' update in the next periodic cycle.
-            
-            # Notify waitlist - get book title for notification
-            cursor.execute('SELECT title FROM books WHERE book_id = ?', (book_id,))
-            book_row = cursor.fetchone()
-            if book_row:
-                book_title = book_row[0]
-                self._notify_waitlist(book_id, book_title)
+            cursor.execute('COMMIT')
+
+            # Notify waitlist (post-transaction)
+            try:
+                cursor.execute('SELECT title FROM books WHERE book_id = ?', (book_id,))
+                book_row = cursor.fetchone()
+                if book_row:
+                    book_title = book_row[0]
+                    self._notify_waitlist(book_id, book_title)
+            except Exception as e:
+                print(f"Waitlist notification failed: {e}")
             
             return True, "Book returned successfully"
         except Exception as e:
+            try:
+                cursor.execute('ROLLBACK')
+            except Exception:
+                pass
             return False, f"Error: {str(e)}"
         finally:
             conn.close()
