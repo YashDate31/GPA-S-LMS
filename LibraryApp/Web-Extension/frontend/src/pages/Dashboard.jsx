@@ -26,10 +26,13 @@ export default function Dashboard({ user }) {
   const [profilePhoto, setProfilePhoto] = useState(null);
   const [renewingBookId, setRenewingBookId] = useState(null);
 
-  // Load profile photo directly from backend endpoint
+  // BUG 4 FIX: Don't unconditionally pre-set the backend URL (causes 404 flash
+  // for users with no photo). Use a HEAD request to check photo existence first.
   useEffect(() => {
     if (user?.enrollment_no) {
-      setProfilePhoto(`/api/profile/photo?_t=${new Date().getTime()}`);
+      axios.head('/api/profile/photo')
+        .then(() => setProfilePhoto(`/api/profile/photo?_t=${new Date().getTime()}`))
+        .catch(() => setProfilePhoto(null)); // avatars fallback will handle it
     }
   }, [user]);
 
@@ -94,11 +97,14 @@ export default function Dashboard({ user }) {
   };
 
   const getLoanStatus = (book) => {
+    // BUG 8 FIX: Check 'status' field directly first — overdue books have status='overdue'
+    // The old logic parsed days_msg with /\D/g which strips ALL non-digits, so
+    // "101 days late" -> "101" which is NOT <=3, so overdue showed as green "On Time".
     if (book.status === 'overdue') return 'overdue';
-    // Parser for "5 days left" logic
-    const days = parseInt(book.days_msg?.replace(/\D/g, '') || '10', 10);
-    if (days <= 3) return 'due_soon';
-    return 'normal';
+    // Only use days_msg to detect "due soon" for active (non-overdue) loans
+    const match = book.days_msg?.match(/^(\d+)\s*days?\s*left/i);
+    const days = match ? parseInt(match[1], 10) : 99;
+    return days <= 3 ? 'due_soon' : 'normal';
   };
 
   // Helper to safely format relative dates from "YYYY-MM-DD HH:MM:SS"

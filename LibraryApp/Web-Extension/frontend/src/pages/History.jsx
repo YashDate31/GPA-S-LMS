@@ -36,7 +36,19 @@ export default function History({ user }) {
   };
 
   if (loading) return <div className="p-10 text-center text-slate-500 animate-pulse font-medium">Loading History...</div>;
-  if (!data || (!data.history || data.history.length === 0) && (!loanHistory || loanHistory.total_borrowed === 0)) return (
+
+  // BUG 6 FIX: Guard 'data' separately before destructuring.
+  // Old code: (!data || ...) && (!loanHistory || ...) would fall through to
+  // destructuring 'data' when it's null if loanHistory loaded, causing a crash.
+  const { history = [], analytics } = data || {};
+  const { stats = {}, badges = [] } = analytics || {};
+
+  // Show empty state only when there is genuinely no history to display
+  const hasNoHistory =
+    history.length === 0 &&
+    (!loanHistory || loanHistory.total_borrowed === 0);
+
+  if (!data && !loanHistory) return (
      <div className="p-10">
         <EmptyState 
            icon={HistoryIcon}
@@ -48,8 +60,17 @@ export default function History({ user }) {
      </div>
   );
 
-  const { history = [], analytics } = data;
-  const { stats = {}, badges = [] } = analytics || {};
+  if (hasNoHistory) return (
+     <div className="p-10">
+        <EmptyState 
+           icon={HistoryIcon}
+           title="No reading history yet"
+           description="You haven't borrowed any books yet. Once you start reading, your history and stats will appear here."
+           actionLabel="Start Reading"
+           onAction={() => window.location.href = '/books'}
+        />
+     </div>
+  );
 
   // Get all loan records
   const allLoans = [];

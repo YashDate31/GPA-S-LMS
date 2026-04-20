@@ -77,7 +77,13 @@ export default function Settings({ user, setUser }) {
         const { data } = await axios.post('/api/change_password', { new_password: newPassword });
         if (data.status === 'success') {
             setPasswordMsg('Success! Password updated.');
-            setTimeout(() => window.location.reload(), 1000);
+            // Clear fields and close accordion cleanly — no page reload needed
+            setTimeout(() => {
+                setNewPassword('');
+                setConfirmPassword('');
+                setIsChangingPassword(false);
+                setPasswordMsg('');
+            }, 1500);
         } else {
             setPasswordMsg(data.message || 'Failed to update');
         }
@@ -103,12 +109,15 @@ export default function Settings({ user, setUser }) {
         const { data } = await axios.post('/api/settings', payload);
         
         if (data.status === 'success') {
-            // Optimistic update of parent state if possible, or force reload
-            // Ideally notify user and update 'user' prop context
             toast.success("Settings saved successfully!");
-            
-            // Trigger a silent reload of user data if possible, or just reload page
-            window.location.reload(); 
+            // BUG 1 FIX: Re-fetch user from /api/me and update parent state silently
+            // instead of window.location.reload() which loses state and re-runs checkSession
+            try {
+                const { data: fresh } = await axios.get('/api/me');
+                if (fresh.user) setUser(fresh.user);
+            } catch (fetchErr) {
+                console.warn('Could not refresh user state:', fetchErr);
+            }
         } else {
            toast.error(data.message || "Failed to save settings.");
         }
@@ -237,14 +246,22 @@ export default function Settings({ user, setUser }) {
                         <span className="block font-bold text-slate-800 dark:text-white text-lg transition-colors">Dark Mode</span>
                         <span className="text-xs font-medium text-slate-400 dark:text-slate-500 group-hover:text-slate-500 dark:group-hover:text-slate-400 transition-colors">Reduce eye strain at night</span>
                     </div>
-                    <Switch checked={darkMode} onChange={(checked) => {
+                    <Switch checked={darkMode} onChange={async (checked) => {
                         setDarkMode(checked);
+                        // Apply immediately to DOM
                         if (checked) {
                             document.documentElement.classList.add('dark');
                             localStorage.setItem('theme', 'dark');
                         } else {
                             document.documentElement.classList.remove('dark');
                             localStorage.setItem('theme', 'light');
+                        }
+                        // BUG 3 FIX: Also persist to server immediately so theme survives
+                        // a hard refresh even if the user doesn't click "Save"
+                        try {
+                            await axios.post('/api/settings', { theme: checked ? 'dark' : 'light' });
+                        } catch (err) {
+                            console.warn('Failed to persist theme to server:', err);
                         }
                     }} />
                 </div>
