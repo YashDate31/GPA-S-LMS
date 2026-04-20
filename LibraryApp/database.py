@@ -183,10 +183,14 @@ class Database:
         threading.Thread(target=_do_push, daemon=True).start()
 
     def get_connection(self):
-        """Always returns a local SQLite connection for fast, lag-free operation"""
-        conn = sqlite3.connect(self.db_path)
+        """Always returns a local SQLite connection for fast, lag-free operation.
+        WAL mode + busy_timeout allow concurrent readers + 1 writer without deadlocking.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)  # wait up to 30s for a lock
         conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA journal_mode=WAL')      # concurrent readers + 1 writer
         conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('PRAGMA busy_timeout = 10000')  # retry for up to 10s before raising
         return conn
     
     def create_table_safe(self, cursor, table_name, pg_sql, sqlite_sql):
@@ -436,10 +440,43 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+
         conn.commit()
 
-        
+        # Migration: admin_activity schema update (description→details, add admin_user)
+        # This is needed for databases created before the column rename.
+        # CREATE TABLE IF NOT EXISTS never alters existing tables, so we do it manually.
+        try:
+            cursor.execute("PRAGMA table_info(admin_activity)")
+            admin_cols = {row[1] for row in cursor.fetchall()}
+            if 'description' in admin_cols and 'details' not in admin_cols:
+                # SQLite <3.25 doesn't support RENAME COLUMN — use table-rebuild
+                cursor.execute("""
+                    CREATE TABLE admin_activity_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        action TEXT NOT NULL,
+                        details TEXT,
+                        admin_user TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    INSERT INTO admin_activity_new (id, timestamp, action, details, updated_at)
+                    SELECT id, timestamp, action, description, CURRENT_TIMESTAMP FROM admin_activity
+                """)
+                cursor.execute("DROP TABLE admin_activity")
+                cursor.execute("ALTER TABLE admin_activity_new RENAME TO admin_activity")
+                conn.commit()
+                print("Migration: admin_activity — renamed 'description' to 'details'")
+            elif 'admin_activity' in {r[1] for r in []} or True:  # always check
+                if 'admin_user' not in admin_cols and 'details' in admin_cols:
+                    cursor.execute("ALTER TABLE admin_activity ADD COLUMN admin_user TEXT")
+                    conn.commit()
+                    print("Migration: admin_activity — added 'admin_user' column")
+        except Exception as _e:
+            print(f"Migration warning (admin_activity schema): {_e}")
+
         # Migration: Add fine column if it doesn't exist
         # Migration: Add fine column if it doesn't exist (SQLite specific logic usually, but let's check basic columns)
         # For Cloud DB, we assume schema is managed or initially created correct. 

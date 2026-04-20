@@ -3404,34 +3404,27 @@ Government Polytechnic Awasari (Kh)"""
             print(f"Preview error: {e}")
     
     def _log_admin_activity(self, action, details):
-        """Log admin activity to database"""
-        try:
-            conn = self.db.get_connection()
-            c = conn.cursor()
-            
-            # Create admin_activity table if it doesn't exist (works for both SQLite and PostgreSQL)
+        """Log admin activity to database asynchronously (fire-and-forget).
+
+        Running this in a background thread prevents it from opening a competing
+        SQLite connection inside a UI callback that fires immediately after a
+        borrow/return commit -- the secondary trigger path for 'database is locked'.
+        """
+        def _log_worker():
             try:
-                c.execute('''CREATE TABLE IF NOT EXISTS admin_activity (
-                    id SERIAL PRIMARY KEY,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    action TEXT NOT NULL,
-                    details TEXT,
-                    admin_user TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
+                conn = self.db.get_connection()
+                c = conn.cursor()
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                c.execute(
+                    'INSERT INTO admin_activity (timestamp, action, details, admin_user) VALUES (?, ?, ?, ?)',
+                    (timestamp, action, details, 'Admin')
+                )
                 conn.commit()
-            except:
-                # Table already exists, continue
-                pass
-            
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            c.execute('''INSERT INTO admin_activity (timestamp, action, details, admin_user)
-                        VALUES (?, ?, ?, ?)''', (timestamp, action, details, 'Admin'))
-            
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Error logging admin activity: {e}")
+                conn.close()
+            except Exception as e:
+                print(f"Error logging admin activity: {e}")
+        import threading as _threading
+        _threading.Thread(target=_log_worker, daemon=True).start()
     
     def _export_report(self, report_type, format_type, date_from, date_to, filter_value, branch_filter="All"):
         """Export report to Excel or PDF format"""
@@ -5647,7 +5640,7 @@ Current Settings:
                     book_id = str(b['book_id']).lower()
                     title = str(b['title']).lower()
                     author = str(b['author']).lower()
-                    barcode = str(b.get('barcode', '') or '').lower()
+                    barcode = str(b['barcode'] if b['barcode'] else '').lower()
                     if query_lower in book_id or query_lower in title or query_lower in author or query_lower in barcode:
                         matches.append(b)
                 return matches[:10]
@@ -5655,7 +5648,7 @@ Current Settings:
                 return []
         
         def format_book_display(book):
-            barcode_str = f" [Barcode: {book.get('barcode')}]" if book.get('barcode') else ""
+            barcode_str = (f" [Barcode: {book['barcode']}]" if book['barcode'] else "")
             return f"{book['book_id']} - {book['title']} by {book['author']}{barcode_str}"
         
         # Helper to find book by barcode and auto-fill book_id
@@ -5670,7 +5663,7 @@ Current Settings:
                         _ac_cache['books_ts'] = now
                     books = _ac_cache['books']
                     for b in books:
-                        barcode = str(b.get('barcode', '') or '')
+                        barcode = str(b['barcode'] if b['barcode'] else '')
                         if barcode and barcode.lower() == query.lower():
                             # Found barcode match - auto-fill with book_id
                             self.borrow_book_id_entry.delete(0, tk.END)
@@ -5897,7 +5890,7 @@ Current Settings:
                     book_id = str(b['book_id']).lower()
                     title = str(b['title']).lower()
                     author = str(b['author']).lower()
-                    barcode = str(b.get('barcode', '') or '').lower()
+                    barcode = str(b['barcode'] if b['barcode'] else '').lower()
                     if query_lower in book_id or query_lower in title or query_lower in author or query_lower in barcode:
                         matches.append(b)
                 return matches[:10]
@@ -5905,7 +5898,7 @@ Current Settings:
                 return []
         
         def format_return_book_display(book):
-            barcode_str = f" [Barcode: {book.get('barcode')}]" if book.get('barcode') else ""
+            barcode_str = (f" [Barcode: {book['barcode']}]" if book['barcode'] else "")
             return f"{book['book_id']} - {book['title']} by {book['author']}{barcode_str}"
         
         # Helper to find book by barcode and auto-fill book_id for return
@@ -5920,7 +5913,7 @@ Current Settings:
                         _ac_cache['books_ts'] = now
                     books = _ac_cache['books']
                     for b in books:
-                        barcode = str(b.get('barcode', '') or '')
+                        barcode = str(b['barcode'] if b['barcode'] else '')
                         if barcode and barcode.lower() == query.lower():
                             # Found barcode match - auto-fill with book_id
                             self.return_book_id_entry.delete(0, tk.END)
