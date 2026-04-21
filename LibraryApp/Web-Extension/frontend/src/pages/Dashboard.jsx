@@ -382,10 +382,10 @@ export default function Dashboard({ user }) {
                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
                              req.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
                              req.status === 'rejected' ? 'bg-red-100 text-red-700' :
-                             req.status === 'cancelled' ? 'bg-slate-100 text-slate-700' :
+                             req.status === 'cancelled' ? 'bg-slate-100 text-slate-500' :
                              'bg-amber-100 text-amber-700'
                            }`}>
-                             {req.status === 'pending' ? 'Reviewing' : req.status}
+                             {req.status === 'pending' ? 'Pending' : req.status}
                            </span>
                            <span className="text-[10px] text-slate-400">{new Date(req.created_at).toLocaleDateString()}</span>
                          </div>

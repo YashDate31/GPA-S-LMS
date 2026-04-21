@@ -828,8 +828,14 @@ def get_db_connection(local_db_name):
     else:
         db_path = os.path.join(BASE_DIR, 'portal.db')
         
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
+    # Enable WAL mode for concurrent read/write access (prevents "database is locked")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+    except Exception:
+        pass
     return conn
 
 def _ensure_local_library_schema():
@@ -2934,9 +2940,18 @@ def api_get_requests():
     conn = get_portal_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM requests WHERE enrollment_no = ? ORDER BY created_at DESC", (session['student_id'],))
-    requests = [dict(row) for row in cursor.fetchall()]
+    rows = cursor.fetchall()
     conn.close()
-    
+
+    # Bug 9 Fix: Normalize PK — always expose as `req_id` so the cancel button
+    # works regardless of whether the DB schema uses `req_id` or legacy `id`.
+    requests = []
+    for row in rows:
+        r = dict(row)
+        if 'req_id' not in r or r['req_id'] is None:
+            r['req_id'] = r.get('id')  # fall back to legacy column
+        requests.append(r)
+
     return jsonify({'requests': requests})
 
 @app.route('/api/request/<int:req_id>/cancel', methods=['POST'])
@@ -3432,7 +3447,7 @@ def api_admin_approve_request(req_id):
         conn.close()
         return jsonify({'status': 'success', 'message': 'Registration approved and student added to library.'})
 
-    # For book requests, check effective availability before approving
+    # For book requests, check availability and then create a real borrow_record (Bug 1 fix)
     if req['request_type'] == 'book_request':
         try:
             details = json.loads(req['details']) if req['details'] else {}
@@ -3442,22 +3457,55 @@ def api_admin_approve_request(req_id):
                 cursor_lib = conn_lib.cursor()
                 cursor_lib.execute("SELECT available_copies FROM books WHERE book_id = ?", (book_id,))
                 book_row = cursor_lib.fetchone()
-                
+
                 if book_row:
                     actual_available = book_row['available_copies']
-                    
-                    # Search for approved but unfulfilled requests
+
+                    # Count already-approved-but-uncollected requests for this book
                     search_pattern = f'%"{book_id}"%'
-                    cursor.execute("SELECT COUNT(*) as count FROM requests WHERE request_type = 'book_request' AND status = 'approved' AND details LIKE ?", (search_pattern,))
+                    cursor.execute(
+                        "SELECT COUNT(*) as count FROM requests WHERE request_type = 'book_request' AND status = 'approved' AND details LIKE ?",
+                        (search_pattern,)
+                    )
                     approved_count = cursor.fetchone()['count']
-                    
+
                     if (actual_available - approved_count) <= 0:
                         conn_lib.close()
                         conn.close()
                         return jsonify({'status': 'error', 'message': 'Cannot approve: All available copies are already issued or reserved.'}), 400
+
+                    # --- Bug 1 Fix: Create borrow_record + decrement available_copies ---
+                    borrow_date = datetime.now().strftime('%Y-%m-%d')
+                    due_date = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d')
+                    enrollment_no = _normalize_enrollment(req['enrollment_no'])
+                    try:
+                        cursor_lib.execute(
+                            """
+                            INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status)
+                            VALUES (?, ?, ?, ?, 'borrowed')
+                            """,
+                            (enrollment_no, book_id, borrow_date, due_date)
+                        )
+                        cursor_lib.execute(
+                            "UPDATE books SET available_copies = MAX(0, available_copies - 1) WHERE book_id = ?",
+                            (book_id,)
+                        )
+                        conn_lib.commit()
+                        # Push to cloud
+                        _push_to_cloud(
+                            "INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status) VALUES (?, ?, ?, ?, 'borrowed')",
+                            (enrollment_no, book_id, borrow_date, due_date)
+                        )
+                        _push_to_cloud(
+                            "UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE book_id = ?",
+                            (book_id,)
+                        )
+                        print(f"[book_request approve] Created borrow_record for {enrollment_no} / {book_id}")
+                    except Exception as br_err:
+                        print(f"[book_request approve] Failed to create borrow_record: {br_err}")
                 conn_lib.close()
-        except:
-            pass
+        except Exception as e:
+            print(f"[book_request approve] Outer error: {e}")
 
     # Update status to approved
     cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
@@ -3602,10 +3650,12 @@ def api_admin_approve_request(req_id):
         email_subject = f"✅ Renewal Approved: {book_title}"
         header_title = "Renewal Approved"
         main_text = f"Your request to renew <strong>{book_title}</strong> was successful. The due date has been extended."
-        # Use the actual new_due_date if we computed it, else estimate
-        try:
-            new_due = new_due_date.strftime('%d %b %Y')
-        except:
+        # Bug 6 Fix: new_due_date is only set inside the borrow_record found block.
+        # Use a safe local reference set during the block, falling back to +7 days.
+        _renewal_new_due = locals().get('new_due_date')
+        if _renewal_new_due is not None:
+            new_due = _renewal_new_due.strftime('%d %b %Y')
+        else:
             new_due = (datetime.now() + timedelta(days=7)).strftime('%d %b %Y')
         details_dict = {
             'Item': book_title,
@@ -3685,10 +3735,7 @@ def api_admin_approve_request(req_id):
     
     conn.commit()
     conn.close()
-    
-    # If it's a profile update, we could apply changes to main DB here
-    # For now, just mark as approved (librarian can manually update if needed)
-    
+
     return jsonify({'status': 'success', 'message': 'Request approved'})
 
 @app.route('/api/admin/requests/<int:req_id>/reject', methods=['GET', 'POST'])
@@ -3696,14 +3743,19 @@ def api_admin_reject_request(req_id):
     """Reject a general request"""
     conn = get_portal_db()
     cursor = conn.cursor()
-    
+
     pk = _requests_pk_column(conn)
-    cursor.execute(f"UPDATE requests SET status = 'rejected' WHERE {pk} = ?", (req_id,))
-    
-    # Get enrollment to notify
+
+    # Bug 5 Fix: SELECT before UPDATE — if req_id is wrong, don't mark anything rejected
     cursor.execute(f"SELECT enrollment_no, request_type, details FROM requests WHERE {pk} = ?", (req_id,))
     req = cursor.fetchone()
-    
+
+    if not req:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Request not found'}), 404
+
+    cursor.execute(f"UPDATE requests SET status = 'rejected' WHERE {pk} = ?", (req_id,))
+
     if req:
          # Parse details to get book name
          message = f"Your {req['request_type']} request was rejected."

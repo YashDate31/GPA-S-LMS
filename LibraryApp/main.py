@@ -14944,15 +14944,19 @@ Note: This is an automated email. Please find the attached formal overdue letter
             self._show_empty_message(self.requests_container, "Could not load requests", f"Portal server may not be running.\n{str(e)}")
 
     def _start_requests_auto_refresh(self):
-        """Periodically poll the portal API so new requests appear automatically"""
+        """Periodically poll the portal API so new requests appear automatically.
+        Bug 10 Fix: HTTP call runs in a daemon thread; Tkinter UI never blocked."""
         if not WEB_PORTAL_AVAILABLE:
             return
         # Only refresh if we're NOT in history mode
         if hasattr(self, 'show_request_history') and not self.show_request_history.get():
-            try:
-                self._refresh_portal_requests()
-            except Exception:
-                pass
+            import threading as _threading
+            def _bg_refresh():
+                try:
+                    self._refresh_portal_requests()
+                except Exception:
+                    pass
+            _threading.Thread(target=_bg_refresh, daemon=True).start()
         # Schedule next poll in 30 seconds
         self.root.after(30000, self._start_requests_auto_refresh)
 
@@ -15344,11 +15348,13 @@ Note: This is an automated email. Please find the attached formal overdue letter
             import json
             
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/requests/{req_id}/{action}"
-            
-            # v5.2 FIX: Use GET request to avoid 405 Method Not Allowed issues with POST
-            req = urllib.request.Request(url, method='GET')
-            # No data or headers needed for GET
-            
+
+            # Bug 3 Fix: Use POST for state-changing operations (GET is semantically
+            # wrong and can be cached/replayed by proxies, causing double-actions).
+            # The portal's csrf_protect() skips /api/admin/ routes, so POST works fine.
+            req = urllib.request.Request(url, data=b'', method='POST')
+            req.add_header('Content-Type', 'application/json')
+
             with urllib.request.urlopen(req, timeout=5) as response:
                 result = json.loads(response.read().decode())
                 if result.get('status') == 'success':
