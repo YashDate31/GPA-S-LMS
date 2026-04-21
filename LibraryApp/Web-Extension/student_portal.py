@@ -3461,18 +3461,10 @@ def api_admin_approve_request(req_id):
                 if book_row:
                     actual_available = book_row['available_copies']
 
-                    # Count already-approved-but-uncollected requests for this book
-                    search_pattern = f'%"{book_id}"%'
-                    cursor.execute(
-                        "SELECT COUNT(*) as count FROM requests WHERE request_type = 'book_request' AND status = 'approved' AND details LIKE ?",
-                        (search_pattern,)
-                    )
-                    approved_count = cursor.fetchone()['count']
-
-                    if (actual_available - approved_count) <= 0:
+                    if actual_available <= 0:
                         conn_lib.close()
                         conn.close()
-                        return jsonify({'status': 'error', 'message': 'Cannot approve: All available copies are already issued or reserved.'}), 400
+                        return jsonify({'status': 'error', 'message': 'Cannot approve: No available copies left in the library.'}), 400
 
                     # --- Bug 1 Fix: Create borrow_record + decrement available_copies ---
                     borrow_date = datetime.now().strftime('%Y-%m-%d')
