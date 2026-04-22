@@ -7,6 +7,9 @@ Syncs data between local SQLite and remote PostgreSQL databases
 import os
 import json
 import sqlite3
+import socket
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from typing import Optional
 
 # Load .env if available (for DATABASE_URL)
 try:
@@ -27,12 +30,113 @@ from datetime import datetime
 import threading
 import time
 
+
+def _ensure_sslmode_require(db_url: str) -> str:
+    """Ensure DATABASE_URL contains sslmode=require without duplicating params."""
+    try:
+        parsed = urlparse(db_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if 'sslmode' not in query:
+            query['sslmode'] = 'require'
+            parsed = parsed._replace(query=urlencode(query))
+            return urlunparse(parsed)
+        return db_url
+    except Exception:
+        if 'sslmode' in (db_url or ''):
+            return db_url
+        sep = '&' if '?' in (db_url or '') else '?'
+        return f"{db_url}{sep}sslmode=require"
+
+
+def _extract_supabase_project_ref() -> Optional[str]:
+    """Extract Supabase project ref from SUPABASE_URL/VITE_SUPABASE_URL if available."""
+    candidates = [os.getenv('SUPABASE_URL'), os.getenv('VITE_SUPABASE_URL')]
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            host = (urlparse(raw).hostname or '').strip().lower()
+            if host.endswith('.supabase.co'):
+                ref = host.split('.')[0]
+                if ref:
+                    return ref
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_database_url(db_url: str) -> str:
+    """Normalize DATABASE_URL and auto-fallback from broken pooler host to direct DB host.
+
+    If a pooler hostname cannot be resolved, this falls back to:
+      db.<project-ref>.supabase.co:5432
+    using the same credentials and db name from the original URL.
+    """
+    if not db_url:
+        return db_url
+
+    db_url = _ensure_sslmode_require(db_url)
+
+    try:
+        parsed = urlparse(db_url)
+        host = (parsed.hostname or '').strip().lower()
+        if not host:
+            return db_url
+
+        test_port = parsed.port or 5432
+        try:
+            socket.getaddrinfo(host, test_port)
+            return db_url  # Host resolves; use as-is.
+        except Exception:
+            pass
+
+        if host.endswith('pooler.supabase.com'):
+            project_ref = _extract_supabase_project_ref()
+            if project_ref:
+                direct_host = f"db.{project_ref}.supabase.co"
+                userinfo = ''
+                if parsed.username:
+                    userinfo = parsed.username
+                    if parsed.password is not None:
+                        userinfo += f":{parsed.password}"
+                    userinfo += '@'
+                new_netloc = f"{userinfo}{direct_host}:5432"
+                rewritten = urlunparse(parsed._replace(netloc=new_netloc))
+                rewritten = _ensure_sslmode_require(rewritten)
+                print(f"[Sync] Replaced unresolved Supabase pooler host '{host}' with '{direct_host}'")
+                return rewritten
+    except Exception:
+        pass
+
+    return db_url
+
+
+def _parse_sync_timestamp(value):
+    """Parse DB timestamp/date values for conflict resolution; return None if unknown."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    except Exception:
+        pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
 class SyncManager:
     """Manages bidirectional sync between local and remote databases"""
     
     def __init__(self, local_db_path, remote_config):
         self.local_db_path = local_db_path
-        self.remote_config = remote_config
+        self.remote_config = _normalize_database_url(remote_config)
         self.sync_log_path = os.path.join(os.path.dirname(local_db_path), 'sync_log.json')
         self.is_syncing = False
         self._sync_lock = threading.Lock()
@@ -66,7 +170,9 @@ class SyncManager:
             try:
                 with open(self.sync_log_path, 'r') as f:
                     data = json.load(f)
-                    return data.get('last_sync', '2000-01-01 00:00:00')
+                    # Use the last *successful* checkpoint for incremental sync.
+                    # Never trust failed/in-progress/partial timestamps as delta cutoff.
+                    return data.get('last_successful_sync') or data.get('last_sync', '2000-01-01 00:00:00')
             except:
                 pass
         return '2000-01-01 00:00:00'
@@ -75,12 +181,29 @@ class SyncManager:
         """Save current sync timestamp"""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
+            last_successful = self.last_sync_time
+            if os.path.exists(self.sync_log_path):
+                try:
+                    with open(self.sync_log_path, 'r') as rf:
+                        prev = json.load(rf)
+                        last_successful = prev.get('last_successful_sync', last_successful)
+                except Exception:
+                    pass
+
+            if status == 'completed':
+                last_successful = timestamp
+
             with open(self.sync_log_path, 'w') as f:
                 json.dump({
                     'last_sync': timestamp,
+                    'last_successful_sync': last_successful,
                     'status': status
                 }, f, indent=4)
-            if status in ('completed', 'completed_with_errors'):
+            # CRITICAL: advance cutoff ONLY on fully successful sync.
+            # If we advance on completed_with_errors, failed rows/tables get skipped
+            # in later delta cycles (their updated_at <= new cutoff), causing stale
+            # cloud data and "old data coming back" symptoms on web.
+            if status == 'completed':
                 self.last_sync_time = timestamp
         except Exception as e:
             print(f"Error saving sync time: {e}")
@@ -704,6 +827,7 @@ class SyncManager:
             # Only include columns that actually exist locally (handles schema drift)
             local_cursor.execute(f"PRAGMA table_info({table_name})")
             local_col_names = {col[1].lower() for col in local_cursor.fetchall()}
+            updated_at_supported = ('updated_at' in local_col_names and 'updated_at' in {c.lower() for c in all_remote_columns})
             payload_columns = [
                 c for c in all_remote_columns
                 if c.lower() not in SKIP_COLS and c.lower() in local_col_names
@@ -744,13 +868,32 @@ class SyncManager:
                         where_clause = ' AND '.join([f"{k} = ?" for k in natural_key])
 
                         # Check if this record already exists locally
-                        local_cursor.execute(
-                            f"SELECT 1 FROM {table_name} WHERE {where_clause} LIMIT 1",
-                            key_vals
-                        )
+                        if updated_at_supported:
+                            local_cursor.execute(
+                                f"SELECT updated_at FROM {table_name} WHERE {where_clause} LIMIT 1",
+                                key_vals
+                            )
+                        else:
+                            local_cursor.execute(
+                                f"SELECT 1 FROM {table_name} WHERE {where_clause} LIMIT 1",
+                                key_vals
+                            )
                         exists = local_cursor.fetchone()
 
                         if exists:
+                            # Conflict guard: never overwrite a newer local row with an older cloud row.
+                            if updated_at_supported:
+                                try:
+                                    local_ts_raw = exists[0] if not isinstance(exists, dict) else exists.get('updated_at')
+                                except Exception:
+                                    local_ts_raw = None
+                                remote_ts_raw = row_dict.get('updated_at')
+                                local_ts = _parse_sync_timestamp(local_ts_raw)
+                                remote_ts = _parse_sync_timestamp(remote_ts_raw)
+                                if local_ts and remote_ts and remote_ts <= local_ts:
+                                    synced_count += 1
+                                    continue
+
                             # Update non-key columns only
                             update_cols = [c for c in payload_columns if c not in natural_key]
                             if update_cols:
@@ -1284,9 +1427,8 @@ class SyncManager:
     def auto_sync_daemon(self, interval_minutes=5):
         """Run automatic sync in background thread.
 
-        ARCHITECTURE: Supabase is the source of truth.
-        - Startup: Full mirror — local mirrors Supabase exactly.
-          If you clear Supabase, local clears too on next start.
+                ARCHITECTURE: LOCAL-FIRST with safe cloud synchronization.
+                - Startup: push local changes first (never destructive to local).
         - Offline: Uses local SQLite cache automatically.
         - Periodic: Delta sync (bidirectional) every interval_minutes.
         """
@@ -1299,71 +1441,39 @@ class SyncManager:
             except Exception as e:
                 print(f"[Auto-Sync] Constraint setup warning: {e}")
 
-            # --- Step 2: Full mirror on startup (Supabase → local, destructive) ---
-            print(f"[Auto-Sync] Startup FULL MIRROR (Supabase is authoritative)...")
+            # --- Step 2: Safe startup sync (local-first, non-destructive) ---
+            print(f"[Auto-Sync] Startup SAFE SYNC (local-first, non-destructive)...")
             try:
-                if psycopg2 is None:
-                    raise RuntimeError("psycopg2 not installed")
-                local_conn = sqlite3.connect(self.local_db_path, timeout=30)
-                local_conn.execute('PRAGMA journal_mode=WAL')
-                local_conn.execute('PRAGMA busy_timeout = 10000')
-                remote_conn = psycopg2.connect(
-                    self.remote_config,
-                    connect_timeout=8, keepalives=1,
-                    keepalives_idle=30, keepalives_interval=10, keepalives_count=3
-                )
-                mirror_tables = ['students', 'books', 'borrow_records',
-                                 'academic_years', 'promotion_history', 'system_settings']
-                total = 0
-                for tbl in mirror_tables:
-                    total += self._sync_table_full_mirror(local_conn, remote_conn, tbl)
-                
-                # --- NEW Step: Recalculate available_copies based on active borrows ---
-                # This fixes corrupted counts by deriving them solely from current borrow status
-                print("[Auto-Sync] Recalculating book copies...")
-                lc = local_conn.cursor()
-                rc = remote_conn.cursor()
+                startup_tables = ['students', 'books', 'borrow_records', 'admin_activity',
+                                 'academic_years', 'promotion_history', 'system_settings',
+                                 'requests', 'deletion_requests', 'student_auth', 'notices']
+                result = self.sync_now(direction='both', tables_override=startup_tables)
+                if result.get('success'):
+                    print(f"[Auto-Sync] Startup safe sync complete: {result.get('records_synced', 0)} records")
+                else:
+                    print(f"[Auto-Sync] Startup safe sync completed with issues: {result.get('errors', [])}")
 
-                # Fix total_copies from barcode (source of truth: actual accession count)
-                lc.execute("""
-                    UPDATE books
-                    SET total_copies = (
-                        LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1
-                    )
-                    WHERE barcode IS NOT NULL AND TRIM(barcode) != ''
-                    AND total_copies != (LENGTH(barcode) - LENGTH(REPLACE(barcode, ',', '')) + 1)
-                """)
-                local_conn.commit()
-
-                lc.execute("SELECT book_id, total_copies FROM books")
-                books_list = lc.fetchall()
-                
-                updates_to_remote = []
-                for b_id, t_copies in books_list:
-                    lc.execute("SELECT COUNT(*) FROM borrow_records WHERE book_id = ? AND status = 'borrowed'", (b_id,))
-                    borrowed_count = lc.fetchone()[0]
-                    new_available = max(0, t_copies - borrowed_count)
-                    # Update local
-                    lc.execute("UPDATE books SET available_copies = ?, updated_at = CURRENT_TIMESTAMP WHERE book_id = ?", (new_available, b_id))
-                    updates_to_remote.append((new_available, b_id))
-                
-                # CRITICAL FIX: Commit SQLite *BEFORE* doing Postgres network I/O.
-                # If we do rc.execute() before local_conn.commit(), SQLite holds a RESERVED/EXCLUSIVE
-                # lock while waiting for network from Supabase, locking out `borrow_book` dead in the UI.
-                local_conn.commit()
-                
-                # Now update remote without holding up the local SQLite database
-                for new_avail, b_id in updates_to_remote:
-                    rc.execute("UPDATE books SET available_copies = %s, updated_at = CURRENT_TIMESTAMP WHERE book_id = %s", (new_avail, b_id))
-                
-                remote_conn.commit()
-                remote_conn.close()
-                local_conn.close()
-                self._register_sync_success()
-                self._save_sync_time(status='completed')
-                print(f"[Auto-Sync] Full mirror and count recalculation complete: {total} records synced")
+                # Self-heal: one-time full core push (local -> remote) to recover from
+                # old/incorrect delta checkpoints created by prior versions.
+                # This prevents "web shows old data" even after restart when local rows
+                # are older than a previously polluted last_sync cutoff.
+                try:
+                    core_tables = ['students', 'books', 'borrow_records', 'system_settings']
+                    prev_cutoff = self.last_sync_time
+                    self.last_sync_time = '2000-01-01 00:00:00'
+                    heal = self.sync_now(direction='local_to_remote', tables_override=core_tables)
+                    if heal.get('success'):
+                        print(f"[Auto-Sync] Startup catch-up push complete: {heal.get('records_synced', 0)} records")
+                    else:
+                        print(f"[Auto-Sync] Startup catch-up push issues: {heal.get('errors', [])}")
+                    # sync_now writes a fresh successful cutoff on success; on failure,
+                    # restore previous in-memory cutoff for the next retry cycle.
+                    if not heal.get('success'):
+                        self.last_sync_time = prev_cutoff
+                except Exception as e:
+                    print(f"[Auto-Sync] Startup catch-up push failed: {e}")
             except Exception as e:
-                print(f"[Auto-Sync] Full mirror failed (offline?): {e}")
+                print(f"[Auto-Sync] Startup safe sync failed (offline?): {e}")
                 print(f"[Auto-Sync] Running in OFFLINE mode — using local SQLite cache")
 
             next_run_ts = time.time() + (interval_minutes * 60)
@@ -1404,7 +1514,7 @@ class SyncManager:
 
         thread = threading.Thread(target=sync_loop, daemon=True)
         thread.start()
-        print(f"[Auto-Sync] Daemon started (full mirror on startup + delta every {interval_minutes} min)")
+        print(f"[Auto-Sync] Daemon started (safe startup sync + delta every {interval_minutes} min)")
 
 
 def create_sync_manager(db):
@@ -1439,7 +1549,7 @@ def create_sync_manager(db):
         
         # Parse PostgreSQL connection string
         # Format: postgresql://user:password@host:port/database
-        remote_config = database_url
+        remote_config = _normalize_database_url(database_url)
         
         print(f"[OK] Sync Manager: Configured for remote sync")
         print(f"   Local: {local_db_path}")
