@@ -644,6 +644,19 @@ def log_request(response):
         
     return response
 
+
+@app.after_request
+def disable_api_response_caching(response):
+    """Force fresh API reads to avoid stale dashboard/session data from browser caches."""
+    try:
+        if request.path.startswith('/api/'):
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+    except Exception:
+        pass
+    return response
+
 def cleanup_logs():
     """Delete logs older than 7 days"""
     try:
