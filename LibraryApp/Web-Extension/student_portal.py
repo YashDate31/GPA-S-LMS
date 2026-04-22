@@ -4,6 +4,8 @@ import os
 import sys
 import json
 from datetime import datetime, timedelta
+import socket
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import smtplib
@@ -47,6 +49,81 @@ _portal_pool_failed = False  # Track if pool init already failed
 _portal_cloud_fail_time = 0  # Timestamp of last cloud failure (retry after cooldown)
 _PORTAL_CLOUD_RETRY_COOLDOWN = 60  # Retry cloud DB after 60 seconds
 _library_schema_checked = False
+
+
+def _ensure_sslmode_require(db_url: str) -> str:
+    """Ensure DATABASE_URL contains sslmode=require."""
+    try:
+        parsed = urlparse(db_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if 'sslmode' not in query:
+            query['sslmode'] = 'require'
+            parsed = parsed._replace(query=urlencode(query))
+            return urlunparse(parsed)
+        return db_url
+    except Exception:
+        if 'sslmode' in (db_url or ''):
+            return db_url
+        sep = '&' if '?' in (db_url or '') else '?'
+        return f"{db_url}{sep}sslmode=require"
+
+
+def _extract_supabase_project_ref() -> str | None:
+    """Extract Supabase project ref from SUPABASE_URL/VITE_SUPABASE_URL if available."""
+    candidates = [os.getenv('SUPABASE_URL'), os.getenv('VITE_SUPABASE_URL')]
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            host = (urlparse(raw).hostname or '').strip().lower()
+            if host.endswith('.supabase.co'):
+                ref = host.split('.')[0]
+                if ref:
+                    return ref
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_database_url(db_url: str) -> str:
+    """Normalize DATABASE_URL; auto-fallback unresolved pooler host to direct DB host."""
+    if not db_url:
+        return db_url
+
+    db_url = _ensure_sslmode_require(db_url)
+
+    try:
+        parsed = urlparse(db_url)
+        host = (parsed.hostname or '').strip().lower()
+        if not host:
+            return db_url
+
+        test_port = parsed.port or 5432
+        try:
+            socket.getaddrinfo(host, test_port)
+            return db_url
+        except Exception:
+            pass
+
+        if host.endswith('pooler.supabase.com'):
+            ref = _extract_supabase_project_ref()
+            if ref:
+                direct_host = f"db.{ref}.supabase.co"
+                userinfo = ''
+                if parsed.username:
+                    userinfo = parsed.username
+                    if parsed.password is not None:
+                        userinfo += f":{parsed.password}"
+                    userinfo += '@'
+                new_netloc = f"{userinfo}{direct_host}:5432"
+                rewritten = urlunparse(parsed._replace(netloc=new_netloc))
+                rewritten = _ensure_sslmode_require(rewritten)
+                print(f"[Portal] Replaced unresolved Supabase pooler host '{host}' with '{direct_host}'")
+                return rewritten
+    except Exception:
+        pass
+
+    return db_url
 
 
 # --- Configuration ---
@@ -196,7 +273,7 @@ def _push_to_cloud(sql, params=None):
     """Fire-and-forget: replicate a write to Supabase in a background thread.
     Used by student_portal endpoints that modify library data on desktop (local SQLite)
     to keep Supabase in sync for the web portal on Render."""
-    database_url = os.getenv('DATABASE_URL')
+    database_url = _normalize_database_url(os.getenv('DATABASE_URL'))
     if not database_url or not POSTGRES_AVAILABLE:
         return
     # Don't push if we're already on Render (writes go directly to Postgres)
@@ -792,15 +869,11 @@ def get_db_connection(local_db_name):
     Render: always Postgres since the server is co-located with Supabase."""
     global _portal_pg_pool, _portal_pool_failed
     
-    database_url = os.getenv('DATABASE_URL')
+    database_url = _normalize_database_url(os.getenv('DATABASE_URL'))
     is_server_deploy = os.getenv('RENDER') or os.getenv('IS_SERVER')
     
     # On Render (cloud deployment), use Postgres directly — low latency, no local state needed
     if is_server_deploy and database_url and POSTGRES_AVAILABLE:
-        if database_url and 'sslmode' not in database_url:
-            separator = '&' if '?' in database_url else '?'
-            database_url = database_url + separator + 'sslmode=require'
-        
         # Initialize pool once
         if _portal_pg_pool is None and not _portal_pool_failed:
             with _portal_pool_lock:
@@ -820,7 +893,10 @@ def get_db_connection(local_db_name):
             conn = psycopg2.connect(database_url, connect_timeout=10)
             return PostgresConnectionWrapper(conn)
         except Exception as e:
-            print(f"[WARNING] Portal: Cloud DB unreachable ({e}). Falling back to SQLite.")
+            msg = f"[ERROR] Portal: Cloud DB unreachable on server deployment ({e})."
+            print(msg)
+            # On server we must not silently serve stale packaged SQLite data.
+            raise RuntimeError(msg)
     
     # Desktop / local: always use SQLite for instant response
     if local_db_name == 'library.db':
