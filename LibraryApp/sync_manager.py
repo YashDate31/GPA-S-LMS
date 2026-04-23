@@ -299,6 +299,51 @@ class SyncManager:
                             )
                         except Exception:
                             pass
+                    # Special: backfill accession_no from book_id immediately after adding
+                    # so the natural key (enrollment_no, accession_no, borrow_date) is never NULL
+                    # and ON CONFLICT upserts work correctly on the cloud.
+                    if col_name_lower == 'accession_no' and table_name == 'borrow_records':
+                        try:
+                            remote_cursor.execute("""
+                                UPDATE borrow_records
+                                SET accession_no = CASE
+                                    WHEN STRPOS(book_id, '-') > 0
+                                        THEN SPLIT_PART(book_id, '-', 1)
+                                    ELSE book_id
+                                END
+                                WHERE accession_no IS NULL OR accession_no = ''
+                            """)
+                            print("[Schema Sync] Backfilled accession_no from book_id on remote borrow_records")
+                        except Exception as _e:
+                            print(f"[Schema Sync] accession_no backfill warning: {_e}")
+                        # Also ensure the correct UNIQUE constraint exists
+                        try:
+                            remote_cursor.execute("""
+                                DO $$
+                                BEGIN
+                                    -- Drop old constraint that used book_id (incompatible with new natural key)
+                                    IF EXISTS (
+                                        SELECT 1 FROM pg_constraint
+                                        WHERE conrelid = 'borrow_records'::regclass
+                                          AND conname = 'borrow_records_unique_entry'
+                                    ) THEN
+                                        ALTER TABLE borrow_records DROP CONSTRAINT borrow_records_unique_entry;
+                                    END IF;
+                                    -- Add correct constraint using accession_no
+                                    IF NOT EXISTS (
+                                        SELECT 1 FROM pg_constraint
+                                        WHERE conrelid = 'borrow_records'::regclass
+                                          AND conname = 'borrow_records_unique_accession_entry'
+                                    ) THEN
+                                        ALTER TABLE borrow_records
+                                        ADD CONSTRAINT borrow_records_unique_accession_entry
+                                        UNIQUE (enrollment_no, accession_no, borrow_date);
+                                    END IF;
+                                END $$;
+                            """)
+                            print("[Schema Sync] Updated UNIQUE constraint on remote borrow_records")
+                        except Exception as _e:
+                            print(f"[Schema Sync] UNIQUE constraint update warning: {_e}")
                     added_any = True
                 except Exception as e:
                     print(f"[Schema Sync] Could not add {table_name}.{col_name}: {e}")

@@ -91,15 +91,44 @@ for table, query in checks.items():
 print()
 
 # ============================================================
+# STEP 1b: Add accession_no column if missing
+# (sync_manager.py uses (enrollment_no, accession_no, borrow_date) as natural key)
+# ============================================================
+run_step('1b', "Add accession_no column to borrow_records (if missing)",
+"""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'borrow_records' AND column_name = 'accession_no'
+    ) THEN
+        ALTER TABLE borrow_records ADD COLUMN accession_no TEXT;
+    END IF;
+END $$;
+""")
+
+# Backfill accession_no from book_id
+run_step('1c', "Backfill accession_no from book_id (extract first number of range)",
+"""
+UPDATE borrow_records
+SET accession_no = CASE
+    WHEN STRPOS(book_id, '-') > 0
+        THEN SPLIT_PART(book_id, '-', 1)
+    ELSE book_id
+END
+WHERE accession_no IS NULL OR accession_no = ''
+""")
+
+# ============================================================
 # STEP 2: Deduplicate borrow_records
 # ============================================================
-run_step(1, "Remove duplicate borrow_records (keep lowest id per enrollment_no+book_id+borrow_date)",
+run_step(1, "Remove duplicate borrow_records (keep lowest id per enrollment_no+accession_no+borrow_date)",
 """
 DELETE FROM borrow_records
 WHERE id NOT IN (
     SELECT MIN(id)
     FROM borrow_records
-    GROUP BY enrollment_no, book_id, borrow_date
+    GROUP BY enrollment_no, accession_no, borrow_date
 )
 """)
 
@@ -143,20 +172,35 @@ WHERE id NOT IN (
 """)
 
 # ============================================================
-# STEP 6: Add UNIQUE constraint on borrow_records
-# (Required for ON CONFLICT (enrollment_no, book_id, borrow_date) in sync_manager)
+# STEP 6: Add correct UNIQUE constraint on borrow_records
+# sync_manager.py uses ON CONFLICT (enrollment_no, accession_no, borrow_date)
 # ============================================================
-run_step(5, "Add UNIQUE constraint on borrow_records(enrollment_no, book_id, borrow_date)",
+run_step(5, "Drop old UNIQUE constraint (enrollment_no, book_id, borrow_date) if it exists",
+"""
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'borrow_records'::regclass
+          AND conname = 'borrow_records_unique_entry'
+    ) THEN
+        ALTER TABLE borrow_records DROP CONSTRAINT borrow_records_unique_entry;
+    END IF;
+END $$;
+""")
+
+run_step('5b', "Add correct UNIQUE constraint on borrow_records(enrollment_no, accession_no, borrow_date)",
 """
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'borrow_records_unique_entry'
+        WHERE conrelid = 'borrow_records'::regclass
+          AND conname = 'borrow_records_unique_accession_entry'
     ) THEN
         ALTER TABLE borrow_records
-        ADD CONSTRAINT borrow_records_unique_entry
-        UNIQUE (enrollment_no, book_id, borrow_date);
+        ADD CONSTRAINT borrow_records_unique_accession_entry
+        UNIQUE (enrollment_no, accession_no, borrow_date);
     END IF;
 END $$;
 """)
