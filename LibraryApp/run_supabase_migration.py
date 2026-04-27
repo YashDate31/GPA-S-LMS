@@ -224,7 +224,94 @@ END $$;
 """)
 
 # ============================================================
-# STEP 8: Post-migration duplicate counts
+# STEP 9: Add missing columns to borrow_records
+# (Referenced by student_portal.py but never added to Supabase)
+# ============================================================
+for col_step, col_desc, col_sql in [
+    ('9a', 'Add fine_paid to borrow_records',
+     "ALTER TABLE borrow_records ADD COLUMN fine_paid INTEGER DEFAULT 0"),
+    ('9b', 'Add fine_paid_at to borrow_records',
+     "ALTER TABLE borrow_records ADD COLUMN fine_paid_at TEXT"),
+    ('9c', 'Add fine_waived to borrow_records',
+     "ALTER TABLE borrow_records ADD COLUMN fine_waived INTEGER DEFAULT 0"),
+    ('9d', 'Add renewal_count to borrow_records',
+     "ALTER TABLE borrow_records ADD COLUMN renewal_count INTEGER DEFAULT 0"),
+    ('9e', 'Add fine_rate_at_borrow to borrow_records',
+     "ALTER TABLE borrow_records ADD COLUMN fine_rate_at_borrow INTEGER"),
+]:
+    run_step(col_step, col_desc, f"""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'borrow_records' AND column_name = '{col_sql.split('ADD COLUMN ')[1].split(' ')[0]}'
+    ) THEN
+        {col_sql};
+    END IF;
+END $$;
+""")
+
+# ============================================================
+# STEP 10: Add missing columns to other tables
+# ============================================================
+for col_step, col_desc, tbl, col_name, col_def in [
+    ('10a', 'Add notified_at to book_waitlist',
+     'book_waitlist', 'notified_at', 'TEXT'),
+    ('10b', 'Add approved_at to requests',
+     'requests', 'approved_at', 'TEXT'),
+    ('10c', 'Add drive_link to study_materials',
+     'study_materials', 'drive_link', 'TEXT'),
+]:
+    run_step(col_step, col_desc, f"""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = '{tbl}' AND column_name = '{col_name}'
+    ) THEN
+        ALTER TABLE {tbl} ADD COLUMN {col_name} {col_def};
+    END IF;
+END $$;
+""")
+
+# ============================================================
+# STEP 11: Create failed_emails table
+# (Used by student_portal.py for email failure retry tracking)
+# ============================================================
+run_step(11, "Create failed_emails table",
+"""
+CREATE TABLE IF NOT EXISTS failed_emails (
+    id SERIAL PRIMARY KEY,
+    recipient TEXT NOT NULL,
+    subject TEXT,
+    body TEXT,
+    error_msg TEXT,
+    retry_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_retry_at TIMESTAMP
+)
+""")
+
+# ============================================================
+# STEP 12: Create sync_conflicts table
+# (Used by sync_manager.py for conflict visibility)
+# ============================================================
+run_step(12, "Create sync_conflicts table",
+"""
+CREATE TABLE IF NOT EXISTS sync_conflicts (
+    id SERIAL PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    natural_key TEXT NOT NULL,
+    local_updated_at TEXT,
+    remote_updated_at TEXT,
+    direction TEXT DEFAULT 'remote_to_local',
+    resolved TEXT DEFAULT 'local_wins',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# ============================================================
+# STEP 13: Post-migration duplicate counts
 # ============================================================
 print("=== Post-migration duplicate counts ===")
 for table, query in checks.items():

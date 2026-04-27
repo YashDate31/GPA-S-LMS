@@ -8,6 +8,7 @@ import socket
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+import html as _html
 import smtplib
 import threading
 from email.mime.text import MIMEText
@@ -595,7 +596,13 @@ def _check_submit_cooldown(enrollment_no, req_type):
 # --- FIX 2.9: Waitlist notification helper for portal-side use ---
 def _portal_notify_waitlist(book_id):
     """Notify first person on waitlist when a book becomes available (portal context).
-    Called when a book_request is rejected, freeing the reserved copy."""
+    Called when a book_request is rejected, freeing the reserved copy.
+
+    NOTE: This function uses '?' placeholders which work on both SQLite and Postgres
+    because get_portal_db() returns a PostgresConnectionWrapper whose cursor()
+    returns a PostgresCursorWrapper that translates '?' to '%s'. Do not bypass
+    the wrapper or use psycopg2 directly without changing the placeholders.
+    """
     try:
         conn_portal = get_portal_db()
         cur_p = conn_portal.cursor()
@@ -1263,6 +1270,7 @@ def init_portal_db():
             book_id TEXT NOT NULL,
             book_title TEXT,
             notified INTEGER DEFAULT 0,
+            notified_at TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(enrollment_no, book_id)
         )
@@ -1273,6 +1281,7 @@ def init_portal_db():
             book_id INTEGER NOT NULL,
             book_title TEXT,
             notified INTEGER DEFAULT 0,
+            notified_at TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(enrollment_no, book_id)
         )
@@ -1478,10 +1487,19 @@ def _collection_deadline_worker():
                     try:
                         conn_lib = get_library_db()
                         cursor_lib = conn_lib.cursor()
-                        cursor_lib.execute(
-                            "DELETE FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
-                            (enrollment_no, book_id)
-                        )
+                        # FIX: Delete only ONE borrow_record to avoid wiping
+                        # multiple rows when a student has concurrent loans for the same book.
+                        # Use id-based subquery: pick the single newest matching row.
+                        if _is_postgres_connection(conn_lib):
+                            cursor_lib.execute(
+                                "DELETE FROM borrow_records WHERE id = (SELECT id FROM borrow_records WHERE enrollment_no = %s AND book_id = %s AND status = 'borrowed' ORDER BY borrow_date DESC LIMIT 1)",
+                                (enrollment_no, book_id)
+                            )
+                        else:
+                            cursor_lib.execute(
+                                "DELETE FROM borrow_records WHERE id = (SELECT id FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed' ORDER BY borrow_date DESC LIMIT 1)",
+                                (enrollment_no, book_id)
+                            )
                         if cursor_lib.rowcount > 0:
                             cursor_lib.execute(
                                 "UPDATE books SET available_copies = MIN(available_copies + 1, total_copies) WHERE book_id = ?",
@@ -3039,7 +3057,9 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
     # FIX J5: Escape user-supplied values to prevent HTML injection
     header_title = _html.escape(str(header_title)) if header_title else ''
     user_name = _html.escape(str(user_name)) if user_name else 'Student'
-    # Note: main_text intentionally NOT escaped — it contains trusted HTML like <strong> tags
+    # Note: main_text is NOT escaped here -- it contains trusted static HTML like <strong> tags.
+    # IMPORTANT: All dynamic values (book_title, student_name, etc.) embedded in main_text
+    # MUST be escaped with _html.escape() at the call site before constructing the f-string.
 
     colors = {
         'blue': {'bg': '#0F3460', 'box_bg': '#f0f4f8', 'box_border': '#d9e2ec', 'accent': '#0F3460'},
@@ -3311,7 +3331,7 @@ def api_submit_request():
             b_title = get_title_from_details(details)
             email_subject = f"Request Received: {b_title}"
             header_title = "Reservation Received"
-            main_text = f"We have received your request to reserve <strong>{b_title}</strong>."
+            main_text = f"We have received your request to reserve <strong>{_html.escape(str(b_title))}</strong>."
             details_dict = {
                 'Book Title': b_title,
                 'Request Date': current_date_str,
@@ -3322,7 +3342,7 @@ def api_submit_request():
             b_title = get_title_from_details(details)
             email_subject = f"Renewal Request: {b_title}"
             header_title = "Renewal Request"
-            main_text = f"We have received your request to renew <strong>{b_title}</strong>."
+            main_text = f"We have received your request to renew <strong>{_html.escape(str(b_title))}</strong>."
             details_dict = {
                 'Book Title': b_title,
                 'Request Date': current_date_str,
@@ -4139,7 +4159,7 @@ def api_admin_approve_request(req_id):
     if req['request_type'] == 'book_request':
         email_subject = f"✅ Ready for Pickup: {book_title}"
         header_title = "Request Approved"
-        main_text = f"Great news! Your request to reserve <strong>{book_title}</strong> has been approved. It is ready for collection."
+        main_text = f"Great news! Your request to reserve <strong>{_html.escape(str(book_title))}</strong> has been approved. It is ready for collection."
         deadline = (datetime.now() + timedelta(days=2)).strftime('%d %b %Y')
         details_dict = {
             'Location': 'Main Library Desk',
@@ -4177,9 +4197,8 @@ def api_admin_approve_request(req_id):
                 # FIX 2.6 (B3): If borrow record is None the book was already returned
                 if not borrow_record:
                     conn_lib.close()
-                    # Still mark approved (request was valid) but warn
-                    cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
-                    conn.commit()
+                    # FIX: Do NOT mark as 'approved' — leave as 'pending' so librarian can reject.
+                    # Previously this set status='approved' which corrupted the request state.
                     conn.close()
                     return jsonify({'status': 'error', 'message': 'Cannot renew: No active loan found. The book may have already been returned.'}), 409
 
@@ -4263,7 +4282,7 @@ def api_admin_approve_request(req_id):
         
         email_subject = f"✅ Renewal Approved: {book_title}"
         header_title = "Renewal Approved"
-        main_text = f"Your request to renew <strong>{book_title}</strong> was successful. The due date has been extended."
+        main_text = f"Your request to renew <strong>{_html.escape(str(book_title))}</strong> was successful. The due date has been extended."
         # Bug 6 Fix: new_due_date is only set inside the borrow_record found block.
         # Use a safe local reference set during the block, falling back to +7 days.
         _renewal_new_due = locals().get('new_due_date')
@@ -4450,7 +4469,7 @@ def api_admin_reject_request(req_id):
          student_name = student_record['name'].split()[0] if student_record and student_record['name'] else "Student"
 
          email_subject = f"Request Declined: {book_title}"
-         main_text = f"We regret to inform you that your request regarding <strong>{book_title}</strong> could not be fulfilled at this time."
+         main_text = f"We regret to inform you that your request regarding <strong>{_html.escape(str(book_title))}</strong> could not be fulfilled at this time."
          
          if req['request_type'] == 'profile_update':
              email_subject = "Profile Update Declined"
