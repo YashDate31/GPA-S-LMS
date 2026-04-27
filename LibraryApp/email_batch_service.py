@@ -63,9 +63,10 @@ class EmailBatchService:
             if not batch:
                 break
             
-            # Send batch using thread pool
+            # FIX v9-M3: Process ALL items in batch, not just max_workers
+            # Previously batch[:self.max_workers] dropped items at index 5-9.
             threads = []
-            for email_data in batch[:self.max_workers]:
+            for email_data in batch:
                 thread = threading.Thread(
                     target=self._send_single_email,
                     args=(email_data, email_config)

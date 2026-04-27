@@ -270,6 +270,12 @@ def _is_postgres_connection(conn) -> bool:
         return False
 
 
+# FIX v9-C3: Unified IntegrityError tuple for both SQLite and PostgreSQL
+_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+if POSTGRES_AVAILABLE and psycopg2:
+    _INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg2.IntegrityError)
+
+
 def _push_to_cloud(sql, params=None):
     """Fire-and-forget: replicate a write to Supabase in a background thread.
     Used by student_portal endpoints that modify library data on desktop (local SQLite)
@@ -284,6 +290,9 @@ def _push_to_cloud(sql, params=None):
         try:
             pg_sql = sql.replace('?', '%s')
             pg_sql = pg_sql.replace('INSTR(', 'STRPOS(').replace('instr(', 'strpos(')
+            # FIX v9-M6: Convert SQLite scalar MIN/MAX to Postgres LEAST/GREATEST
+            pg_sql = pg_sql.replace('MIN(available_copies', 'LEAST(available_copies')
+            pg_sql = pg_sql.replace('MAX(0,', 'GREATEST(0,').replace('MAX(COALESCE', 'GREATEST(COALESCE')
             conn = psycopg2.connect(database_url, connect_timeout=5)
             cur = conn.cursor()
             cur.execute(pg_sql, params)
@@ -465,14 +474,21 @@ class RateLimiter:
     
     def _get_client_key(self, endpoint):
         """Generate unique key for client + endpoint"""
-        # Use IP address as identifier
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr) or 'unknown'
+        # FIX v9-H3: Only trust rightmost X-Forwarded-For IP (injected by proxy, not client)
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff and (os.getenv('RENDER') or os.getenv('IS_SERVER')):
+            client_ip = xff.split(',')[-1].strip()
+        else:
+            client_ip = request.remote_addr or 'unknown'
         return f"{client_ip}:{endpoint}"
     
     def _cleanup_old_requests(self, key, window_seconds):
         """Remove requests outside the time window"""
         cutoff = time.time() - window_seconds
         self.requests[key] = [ts for ts in self.requests[key] if ts > cutoff]
+        # FIX v9-M4: Remove empty entries to prevent unbounded dict growth
+        if not self.requests[key]:
+            del self.requests[key]
     
     def is_rate_limited(self, endpoint):
         """Check if request should be rate limited"""
@@ -535,15 +551,13 @@ def generate_csrf_token():
     import secrets
     return secrets.token_hex(32)
 
-# Endpoints excluded from CSRF protection (login flow needs cookie first)
+# Endpoints excluded from CSRF protection (pre-auth flow only — no session cookie yet)
 CSRF_EXCLUDED_ENDPOINTS = [
     '/api/login',
     '/api/public/forgot-password',
     '/api/public/register',
-    '/api/change_password',  # Part of first-time login flow
-    '/api/request',  # Student requests (session-protected)
-    '/api/settings',  # Settings update (session-protected)
-    '/api/request-deletion',  # Deletion request (session-protected)
+    # FIX v9-H4: Removed '/api/change_password', '/api/request', '/api/settings',
+    # '/api/request-deletion' — these are session-protected and MUST enforce CSRF.
 ]
 
 # --- Admin Authentication (shared secret between portal and desktop app) ---
@@ -603,6 +617,8 @@ def _portal_notify_waitlist(book_id):
     returns a PostgresCursorWrapper that translates '?' to '%s'. Do not bypass
     the wrapper or use psycopg2 directly without changing the placeholders.
     """
+    # FIX v9-H5: Use try/finally to ensure conn is always closed
+    conn_portal = None
     try:
         conn_portal = get_portal_db()
         cur_p = conn_portal.cursor()
@@ -619,14 +635,19 @@ def _portal_notify_waitlist(book_id):
                 INSERT INTO user_notifications (enrollment_no, type, title, message, link, created_at)
                 VALUES (?, 'system', 'Book Available', ?, '/catalogue', ?)
             """, (entry['enrollment_no'],
-                  f'"{entry["book_title"]}" is now available for borrowing!',
+                  f'"{ entry["book_title"]}" is now available for borrowing!',
                   datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             cur_p.execute("UPDATE book_waitlist SET notified = 1, notified_at = ? WHERE id = ?",
                           (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), entry['id'],))
             conn_portal.commit()
-        conn_portal.close()
     except Exception as e:
         print(f"[Portal] Waitlist notification failed: {e}")
+    finally:
+        if conn_portal:
+            try:
+                conn_portal.close()
+            except Exception:
+                pass
 
 
 @app.before_request
@@ -676,12 +697,15 @@ def set_csrf_cookie(response):
         token = generate_csrf_token()
         # httponly=False so JavaScript can read it
         # samesite='Lax' for balance of security and usability
+        # FIX v9-M8: Set Secure flag on production (HTTPS)
+        is_secure = bool(os.getenv('RENDER') or os.getenv('IS_SERVER') or request.is_secure)
         response.set_cookie(
             'csrf_token', 
             token, 
             httponly=False, 
             samesite='Lax',
-            max_age=86400  # 24 hours
+            max_age=86400,  # 24 hours
+            secure=is_secure
         )
     return response
 
@@ -2117,14 +2141,14 @@ def api_profile_photo():
                 except OSError as e:
                     # BUG A2 FIX: Log removal failures on DELETE too
                     print(f"[Profile Photo] Failed to remove photo {old_path}: {e}")
-        return jsonify({'status': 'success', 'message': 'Profile photo removed'}) if deleted else jsonify({'error': 'No photo found'}), 404
+        # FIX v9-C5: Operator precedence bug — comma was creating a tuple (response, 404) unconditionally
+        if deleted:
+            return jsonify({'status': 'success', 'message': 'Profile photo removed'})
+        else:
+            return jsonify({'error': 'No photo found'}), 404
 
-    conn = get_portal_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, message, created_at FROM notices WHERE active = 1 ORDER BY created_at DESC")
-    notices = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({'notices': notices})
+    # FIX v9-M5: Removed dead/unreachable code (notices query leftover from copy-paste)
+    return jsonify({'error': 'Method not allowed'}), 405
 
 @app.route('/api/loan-history')
 def api_loan_history():
@@ -2161,7 +2185,11 @@ def api_loan_history():
         if record['status'] == 'borrowed':
             if record['due_date']:
                 try:
-                    due_dt = datetime.strptime(record['due_date'], '%Y-%m-%d')
+                    # FIX v9-C4: Use _parse_date_any for Postgres date object compat
+                    _due_d = _parse_date_any(record['due_date'])
+                    if _due_d is None:
+                        raise ValueError('unparseable due_date')
+                    due_dt = datetime(_due_d.year, _due_d.month, _due_d.day)
                     if due_dt < today:
                         record['actual_status'] = 'Currently Overdue'
                         record['overdue_days'] = (today - due_dt).days
@@ -2170,14 +2198,19 @@ def api_loan_history():
                         record['actual_status'] = 'Currently Borrowed'
                         record['days_left'] = (due_dt - today).days
                         currently_borrowed.append(record)
-                except:
+                except Exception:
                     record['actual_status'] = 'Currently Borrowed'
                     currently_borrowed.append(record)
         elif record['status'] == 'returned':
             if record['due_date'] and record['return_date']:
                 try:
-                    due_dt = datetime.strptime(record['due_date'], '%Y-%m-%d')
-                    return_dt = datetime.strptime(record['return_date'], '%Y-%m-%d')
+                    # FIX v9-C4: Use _parse_date_any for Postgres date object compat
+                    _due_d2 = _parse_date_any(record['due_date'])
+                    _ret_d2 = _parse_date_any(record['return_date'])
+                    if _due_d2 is None or _ret_d2 is None:
+                        raise ValueError('unparseable dates')
+                    due_dt = datetime(_due_d2.year, _due_d2.month, _due_d2.day)
+                    return_dt = datetime(_ret_d2.year, _ret_d2.month, _ret_d2.day)
                     if return_dt > due_dt:
                         record['actual_status'] = 'Returned Late'
                         record['fine_paid'] = record.get('fine', 0) > 0
@@ -2185,7 +2218,7 @@ def api_loan_history():
                     else:
                         record['actual_status'] = 'Returned On Time'
                         returned_on_time.append(record)
-                except:
+                except Exception:
                     record['actual_status'] = 'Returned'
                     returned_on_time.append(record)
     
@@ -2529,7 +2562,11 @@ def api_alerts():
     for row in borrows:
         if row['due_date']:
             try:
-                due_dt = datetime.strptime(row['due_date'], '%Y-%m-%d')
+                # FIX v9-C4: Use _parse_date_any for Postgres date object compat
+                _due_d3 = _parse_date_any(row['due_date'])
+                if _due_d3 is None:
+                    continue
+                due_dt = datetime(_due_d3.year, _due_d3.month, _due_d3.day)
                 delta = (due_dt - today).days
                 if delta < 0:
                     overdue_count += 1
@@ -2538,7 +2575,7 @@ def api_alerts():
                     computed_fine = days_late * fine_per_day
                     total_fine += max(stored_fine, computed_fine)
                     overdue_titles.append(row['title'])
-            except:
+            except Exception:
                 pass
                 
     return jsonify({
@@ -2764,7 +2801,15 @@ def api_dashboard():
         badges.append({'id': 'scholar', 'label': 'Scholar', 'icon': '🎓', 'color': 'bg-indigo-100 text-indigo-700'})
     
     # Check for overdue history
-    has_overdues = any(x['status'] == 'overdue' for x in raw_history) # raw_history needs status mapping
+    # FIX v9-M1: raw_history only has status='returned', so x['status']=='overdue' was always False.
+    # Instead, check if any returned book had return_date > due_date.
+    has_overdues = False
+    for x in raw_history:
+        _rd = _parse_date_any(x.get('return_date'))
+        _dd = _parse_date_any(x.get('due_date'))
+        if _rd and _dd and _rd > _dd:
+            has_overdues = True
+            break
     if not has_overdues and stats['total_books'] > 2:
         badges.append({'id': 'clean_sheet', 'label': 'Clean Sheet', 'icon': '🛡️', 'color': 'bg-blue-100 text-blue-700'})
 
@@ -2976,7 +3021,8 @@ def add_to_waitlist(book_id):
                 'success': True,
                 'message': 'You will be notified when this book becomes available'
             })
-        except sqlite3.IntegrityError:
+        except _INTEGRITY_ERRORS:
+            # FIX v9-C3: Catch both sqlite3 and psycopg2 IntegrityError
             portal_conn.close()
             return jsonify({'error': 'You are already on the waitlist for this book'}), 400
             
@@ -3245,10 +3291,17 @@ def api_submit_request():
                 return jsonify({'error': f'You have ₹{unpaid} in unpaid fines. Please clear your fines before borrowing new books.'}), 403
 
             # FIX A3: Block if student has overdue books
-            cur_lib.execute(
-                "SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed' AND due_date < date('now')",
-                (session['student_id'],)
-            )
+            # FIX v9-C2: date('now') is SQLite-only; use CURRENT_DATE for Postgres
+            if _is_postgres_connection(conn_lib):
+                cur_lib.execute(
+                    "SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed' AND due_date < CURRENT_DATE",
+                    (session['student_id'],)
+                )
+            else:
+                cur_lib.execute(
+                    "SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed' AND due_date < date('now')",
+                    (session['student_id'],)
+                )
             if cur_lib.fetchone()['count'] > 0:
                 conn_lib.close()
                 return jsonify({'error': 'You have overdue books. Please return them before requesting new ones.'}), 403
@@ -3454,6 +3507,9 @@ def api_cancel_request(req_id):
         cursor.execute(f"UPDATE requests SET status = 'cancelled' WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
         conn.commit()
         conn.close()
+        # FIX v9-H2: Notify waitlist when approved request is cancelled
+        if book_id:
+            _portal_notify_waitlist(book_id)
         return jsonify({'status': 'success', 'message': 'Approved request cancelled. Book copies restored.'})
 
     if req['status'] != 'pending':
@@ -3885,7 +3941,7 @@ def api_admin_pending_collection():
 
     return jsonify({'status': 'success', 'pending_collection': results, 'deadline_hours': _COLLECTION_DEADLINE_HOURS})
 
-@app.route('/api/admin/requests/<int:req_id>/approve', methods=['GET', 'POST'])
+@app.route('/api/admin/requests/<int:req_id>/approve', methods=['POST'])
 def api_admin_approve_request(req_id):
     """Approve a general request"""
     conn = get_portal_db()
@@ -4049,12 +4105,14 @@ def api_admin_approve_request(req_id):
                     due_date = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d')
                     enrollment_no = _normalize_enrollment(req['enrollment_no'])
                     try:
+                        # FIX v9-H1: Include fine_rate_at_borrow for audit trail
+                        fine_rate = get_portal_fine_per_day()
                         cursor_lib.execute(
                             """
-                            INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status)
-                            VALUES (?, ?, ?, ?, 'borrowed')
+                            INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status, fine_rate_at_borrow)
+                            VALUES (?, ?, ?, ?, 'borrowed', ?)
                             """,
-                            (enrollment_no, book_id, borrow_date, due_date)
+                            (enrollment_no, book_id, borrow_date, due_date, fine_rate)
                         )
                         cursor_lib.execute(
                             "UPDATE books SET available_copies = MAX(0, available_copies - 1) WHERE book_id = ?",
@@ -4063,8 +4121,8 @@ def api_admin_approve_request(req_id):
                         conn_lib.commit()
                         # Push to cloud
                         _push_to_cloud(
-                            "INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status) VALUES (?, ?, ?, ?, 'borrowed')",
-                            (enrollment_no, book_id, borrow_date, due_date)
+                            "INSERT INTO borrow_records (enrollment_no, book_id, borrow_date, due_date, status, fine_rate_at_borrow) VALUES (?, ?, ?, ?, 'borrowed', ?)",
+                            (enrollment_no, book_id, borrow_date, due_date, fine_rate)
                         )
                         _push_to_cloud(
                             "UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE book_id = ?",
@@ -4170,6 +4228,7 @@ def api_admin_approve_request(req_id):
 
     elif req['request_type'] == 'renewal':
         # Actually extend the due date in the library database
+        new_due_date = None  # FIX v9-L5: Initialize for safe reference below
         try:
             details_parsed = json.loads(req['details']) if isinstance(req['details'], str) else req['details']
             renewal_book_id = details_parsed.get('book_id') if isinstance(details_parsed, dict) else None
@@ -4220,8 +4279,12 @@ def api_admin_approve_request(req_id):
 
                 if borrow_record['due_date']:
                     try:
-                        current_due = datetime.strptime(borrow_record['due_date'], '%Y-%m-%d')
-                    except:
+                        # FIX v9-C4: Use _parse_date_any for Postgres date object compat
+                        _due_d4 = _parse_date_any(borrow_record['due_date'])
+                        if _due_d4 is None:
+                            raise ValueError('unparseable due_date')
+                        current_due = datetime(_due_d4.year, _due_d4.month, _due_d4.day)
+                    except Exception:
                         current_due = datetime.now()
 
                     # FIX 2.5 (B2): If overdue, compute and store accrued fine BEFORE extending
@@ -4283,11 +4346,9 @@ def api_admin_approve_request(req_id):
         email_subject = f"✅ Renewal Approved: {book_title}"
         header_title = "Renewal Approved"
         main_text = f"Your request to renew <strong>{_html.escape(str(book_title))}</strong> was successful. The due date has been extended."
-        # Bug 6 Fix: new_due_date is only set inside the borrow_record found block.
-        # Use a safe local reference set during the block, falling back to +7 days.
-        _renewal_new_due = locals().get('new_due_date')
-        if _renewal_new_due is not None:
-            new_due = _renewal_new_due.strftime('%d %b %Y')
+        # FIX v9-L5: Use explicit variable instead of fragile locals().get()
+        if new_due_date is not None:
+            new_due = new_due_date.strftime('%d %b %Y')
         else:
             new_due = (datetime.now() + timedelta(days=7)).strftime('%d %b %Y')
         details_dict = {
@@ -4389,7 +4450,7 @@ def api_admin_approve_request(req_id):
         msg += wl_warn
     return jsonify({'status': 'success', 'message': msg})
 
-@app.route('/api/admin/requests/<int:req_id>/reject', methods=['GET', 'POST'])
+@app.route('/api/admin/requests/<int:req_id>/reject', methods=['POST'])
 def api_admin_reject_request(req_id):
     """Reject a general request"""
     conn = get_portal_db()
@@ -4501,7 +4562,7 @@ def api_admin_reject_request(req_id):
     
     return jsonify({'status': 'success', 'message': 'Request rejected'})
 
-@app.route('/api/admin/deletion/<int:del_id>/approve', methods=['GET', 'POST'])
+@app.route('/api/admin/deletion/<int:del_id>/approve', methods=['POST'])
 def api_admin_approve_deletion(del_id):
     """Approve account deletion request"""
     conn = get_portal_db()
@@ -4539,22 +4600,27 @@ def api_admin_approve_deletion(del_id):
         conn_lib = get_library_db()
         cursor_lib = conn_lib.cursor()
         
+        # FIX v9-M2: Capture timestamp once to avoid day-boundary race
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        # First, get book_ids of currently borrowed records (before updating)
+        cursor_lib.execute(
+            "SELECT book_id FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'",
+            (student_id,)
+        )
+        books_to_return = [row['book_id'] for row in cursor_lib.fetchall()]
+        
         # Return any borrowed books (mark as returned)
         cursor_lib.execute(
             "UPDATE borrow_records SET status = 'returned', return_date = ? WHERE enrollment_no = ? AND status = 'borrowed'",
-            (datetime.now().strftime('%Y-%m-%d'), student_id)
+            (today_str, student_id)
         )
         
-        # Update available copies for returned books
-        cursor_lib.execute(
-            "SELECT book_id FROM borrow_records WHERE enrollment_no = ? AND return_date = ?",
-            (student_id, datetime.now().strftime('%Y-%m-%d'))
-        )
-        returned_books = cursor_lib.fetchall()
-        for book_row in returned_books:
+        # Update available copies using the pre-fetched list
+        for _book_id in books_to_return:
             cursor_lib.execute(
                 "UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?",
-                (book_row['book_id'],)
+                (_book_id,)
             )
         
         # Delete the student record
@@ -4563,10 +4629,9 @@ def api_admin_approve_deletion(del_id):
         conn_lib.close()
         
         # Push changes to cloud
-        today = datetime.now().strftime('%Y-%m-%d')
         _push_to_cloud(
             "UPDATE borrow_records SET status = 'returned', return_date = ? WHERE enrollment_no = ? AND status = 'borrowed'",
-            (today, student_id)
+            (today_str, student_id)
         )
         _push_to_cloud("DELETE FROM students WHERE enrollment_no = ?", (student_id,))
     except Exception as e:
@@ -4578,19 +4643,23 @@ def api_admin_approve_deletion(del_id):
         'student_id': student_id
     })
 
-@app.route('/api/admin/deletion/<int:del_id>/reject', methods=['GET', 'POST'])
+@app.route('/api/admin/deletion/<int:del_id>/reject', methods=['POST'])
 def api_admin_reject_deletion(del_id):
     """Reject account deletion request"""
     conn = get_portal_db()
     cursor = conn.cursor()
     
     cursor.execute("UPDATE deletion_requests SET status = 'rejected' WHERE id = ?", (del_id,))
+    # FIX v9-L1: Guard against non-existent deletion request
+    if cursor.rowcount == 0:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Deletion request not found'}), 404
     conn.commit()
     conn.close()
     
     return jsonify({'status': 'success', 'message': 'Deletion request rejected'})
 
-@app.route('/api/admin/password-reset/<enrollment_no>', methods=['GET', 'POST'])
+@app.route('/api/admin/password-reset/<enrollment_no>', methods=['POST'])
 def api_admin_reset_password(enrollment_no):
     """Reset student password to enrollment number"""
     conn = get_portal_db()
