@@ -569,6 +569,59 @@ def _check_admin_auth():
     return None
 
 
+# --- FIX 2.19: Lightweight in-memory rate limiter for request submissions ---
+import threading as _rl_threading
+_request_submit_cooldowns = {}  # key: (enrollment_no, req_type) -> last_submit_timestamp
+_cooldown_lock = _rl_threading.Lock()
+_REQUEST_COOLDOWN_SECONDS = 10  # seconds between same-type submissions
+
+def _check_submit_cooldown(enrollment_no, req_type):
+    """Returns True if the student is within cooldown, False if allowed to proceed."""
+    import time
+    key = (enrollment_no, req_type)
+    now = time.time()
+    with _cooldown_lock:
+        last = _request_submit_cooldowns.get(key, 0)
+        if now - last < _REQUEST_COOLDOWN_SECONDS:
+            return True  # Too soon
+        _request_submit_cooldowns[key] = now
+        # Prune old entries (>5 min) to prevent memory leak
+        stale = [k for k, v in _request_submit_cooldowns.items() if now - v > 300]
+        for k in stale:
+            del _request_submit_cooldowns[k]
+    return False
+
+
+# --- FIX 2.9: Waitlist notification helper for portal-side use ---
+def _portal_notify_waitlist(book_id):
+    """Notify first person on waitlist when a book becomes available (portal context).
+    Called when a book_request is rejected, freeing the reserved copy."""
+    try:
+        conn_portal = get_portal_db()
+        cur_p = conn_portal.cursor()
+        cur_p.execute("""
+            SELECT id, enrollment_no, book_title
+            FROM book_waitlist
+            WHERE book_id = ? AND notified = 0
+            ORDER BY created_at ASC
+            LIMIT 1
+        """, (book_id,))
+        entry = cur_p.fetchone()
+        if entry:
+            cur_p.execute("""
+                INSERT INTO user_notifications (enrollment_no, type, title, message, link, created_at)
+                VALUES (?, 'system', 'Book Available', ?, '/catalogue', ?)
+            """, (entry['enrollment_no'],
+                  f'"{entry["book_title"]}" is now available for borrowing!',
+                  datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            cur_p.execute("UPDATE book_waitlist SET notified = 1, notified_at = ? WHERE id = ?",
+                          (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), entry['id'],))
+            conn_portal.commit()
+        conn_portal.close()
+    except Exception as e:
+        print(f"[Portal] Waitlist notification failed: {e}")
+
+
 @app.before_request
 def admin_auth_gate():
     """Enforce admin secret on all /api/admin/ endpoints."""
@@ -1314,6 +1367,45 @@ def init_portal_db():
 
     
     conn.commit()
+
+    # --- Schema migrations for existing tables ---
+    # FIX 2.8: Add notified_at timestamp for waitlist expiry tracking
+    for migration_sql in [
+        "ALTER TABLE book_waitlist ADD COLUMN notified_at TEXT",
+        "ALTER TABLE study_materials ADD COLUMN drive_link TEXT",
+    ]:
+        try:
+            cursor.execute(migration_sql)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+    # FIX 2.18: Create failed_emails table for retry tracking
+    create_table_safe(cursor, 'failed_emails', '''
+        CREATE TABLE IF NOT EXISTS failed_emails (
+            id SERIAL PRIMARY KEY,
+            recipient TEXT NOT NULL,
+            subject TEXT,
+            body TEXT,
+            error_msg TEXT,
+            retry_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_retry_at TIMESTAMP
+        )
+    ''', '''
+        CREATE TABLE IF NOT EXISTS failed_emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipient TEXT NOT NULL,
+            subject TEXT,
+            body TEXT,
+            error_msg TEXT,
+            retry_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_retry_at DATETIME
+        )
+    ''')
+    conn.commit()
+
     conn.close()
 
 # Initialize on Import
@@ -1368,7 +1460,19 @@ def send_email_bg(recipient, subject, body):
         print(f"Email sent to {recipient}")
         
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"Failed to send email to {recipient}: {e}")
+        # FIX 2.18: Log failure for retry/admin visibility
+        try:
+            conn_fail = get_portal_db()
+            cur_fail = conn_fail.cursor()
+            cur_fail.execute(
+                "INSERT INTO failed_emails (recipient, subject, body, error_msg) VALUES (?, ?, ?, ?)",
+                (recipient, subject, body[:2000], str(e)[:500])
+            )
+            conn_fail.commit()
+            conn_fail.close()
+        except Exception:
+            pass  # Don't let logging failure crash the caller
 
 def trigger_notification_email(enrollment_no, subject, body):
     """Fetches user email and triggers background send"""
@@ -2785,6 +2889,40 @@ def remove_from_waitlist(book_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# FIX D3: Waitlist position visibility
+@app.route('/api/books/<book_id>/waitlist-position')
+def get_waitlist_position(book_id):
+    """Get current student's position in the waitlist for a book."""
+    if 'student_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    try:
+        conn = get_portal_db()
+        cursor = conn.cursor()
+        
+        # Get all non-notified waitlist entries ordered by creation
+        cursor.execute(
+            "SELECT enrollment_no FROM book_waitlist WHERE book_id = ? AND notified = 0 ORDER BY created_at ASC",
+            (book_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        position = 0
+        total = len(rows)
+        for i, row in enumerate(rows, 1):
+            if row['enrollment_no'] == session['student_id']:
+                position = i
+                break
+        
+        return jsonify({
+            'position': position,  # 0 means not on waitlist
+            'total_waiting': total,
+            'on_waitlist': position > 0
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 def generate_email_template(header_title, user_name, main_text, details_dict=None, theme='blue', footer_note=None):
     """
     Generates a unified responsive HTML email.
@@ -2880,6 +3018,10 @@ def api_submit_request():
 
     if not req_type or not details:
         return jsonify({'error': 'Missing data'}), 400
+
+    # FIX 2.19: Rate limit — prevent rapid duplicate submissions
+    if _check_submit_cooldown(session['student_id'], req_type):
+        return jsonify({'error': 'Please wait a few seconds before submitting another request.'}), 429
 
     # Prevent duplicate pending renewal requests for the same book copy
     if req_type == 'renewal':
@@ -4144,6 +4286,16 @@ def api_admin_reject_request(req_id):
 
     conn.commit()
     conn.close()
+
+    # FIX 2.9: If a book_request was rejected, notify the next person on the waitlist
+    if req['request_type'] == 'book_request':
+        try:
+            reject_details = json.loads(req['details']) if isinstance(req['details'], str) else req['details']
+            reject_book_id = reject_details.get('book_id') if isinstance(reject_details, dict) else None
+            if reject_book_id:
+                _portal_notify_waitlist(reject_book_id)
+        except Exception:
+            pass
     
     return jsonify({'status': 'success', 'message': 'Request rejected'})
 
