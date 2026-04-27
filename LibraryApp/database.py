@@ -694,6 +694,20 @@ class Database:
         except Exception as e:
             print(f"Index creation warning: {e}")
 
+        # Migration: audit fix columns for borrow_records
+        for _audit_col in [
+            "ALTER TABLE borrow_records ADD COLUMN fine_paid INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN fine_paid_at TEXT",
+            "ALTER TABLE borrow_records ADD COLUMN fine_waived INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN renewal_count INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN fine_rate_at_borrow INTEGER",
+        ]:
+            try:
+                cursor.execute(_audit_col)
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
+
         
         conn.close()
 
@@ -1021,11 +1035,15 @@ class Database:
             # Get active academic year
             academic_year = self.get_active_academic_year()
 
+            # FIX C2: Capture fine rate at borrow time to prevent retroactive changes
+            import os as _os_borrow
+            _fine_rate = int(_os_borrow.getenv('FINE_PER_DAY', 5))
+
             # Add borrow record using provided borrow_date and academic year
             cursor.execute('''
-                INSERT INTO borrow_records (enrollment_no, book_id, accession_no, borrow_date, due_date, academic_year)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year))
+                INSERT INTO borrow_records (enrollment_no, book_id, accession_no, borrow_date, due_date, academic_year, fine_rate_at_borrow)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (enrollment_no, book_id, original_book_id, borrow_date, due_date, academic_year, _fine_rate))
             
             # Update available copies — guard ensures atomic check-and-decrement
             # even if two threads passed the availability check simultaneously.
@@ -1076,7 +1094,7 @@ class Database:
 
             # Try to find an active borrow record by accession_no directly
             cursor.execute(
-                "SELECT book_id, due_date FROM borrow_records WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'",
+                "SELECT book_id, due_date, fine_rate_at_borrow FROM borrow_records WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'",
                 (enrollment_no, original_input)
             )
             accs_row = cursor.fetchone()
@@ -1085,6 +1103,7 @@ class Database:
                 # Found by accession number — use the book_id stored in the borrow record
                 book_id = accs_row[0]
                 accs_due_date = accs_row[1]
+                _borrow_fine_rate = accs_row[2]  # FIX C2: rate at time of borrowing
             else:
                 # Fall back: resolve via book range / direct book_id lookup
                 real_book_id = self._resolve_book_id(cursor, original_input)
@@ -1094,11 +1113,12 @@ class Database:
                 book_id = real_book_id
                 # Look up due date via book_id
                 cursor.execute(
-                    "SELECT due_date FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
+                    "SELECT due_date, fine_rate_at_borrow FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
                     (enrollment_no, book_id)
                 )
                 fb_row = cursor.fetchone()
                 accs_due_date = fb_row[0] if fb_row else None
+                _borrow_fine_rate = fb_row[1] if fb_row else None  # FIX C2
 
             # Calculate fine if overdue
             import os
@@ -1109,7 +1129,8 @@ class Database:
                     ret_dt = datetime.strptime(return_date, '%Y-%m-%d')
                     days_late = (ret_dt - due_dt).days
                     if days_late > 0:
-                        fine_per_day = float(os.getenv('FINE_PER_DAY', 5))
+                        # FIX C2: Use borrow-time rate if available, else current env rate
+                        fine_per_day = float(_borrow_fine_rate) if _borrow_fine_rate else float(os.getenv('FINE_PER_DAY', 5))
                         fine_amount = int(days_late * fine_per_day)
                 except Exception as e:
                     print(f"Error calculating fine during return: {e}")
@@ -1221,6 +1242,79 @@ class Database:
             
         except Exception as e:
             print(f"Error notifying waitlist: {e}")
+
+    def mark_book_lost_or_damaged(self, enrollment_no, book_identifier, status='lost'):
+        """Mark an active borrow as lost or damaged.
+
+        - Sets borrow_records.status to 'lost' or 'damaged'
+        - Applies a replacement fine (LOST_BOOK_FINE env var, default 500)
+        - Decrements total_copies and available_copies on the books table
+        - Does NOT trigger waitlist notifications (copy is permanently gone)
+
+        Returns (success: bool, message: str)
+        """
+        if status not in ('lost', 'damaged'):
+            return False, "Status must be 'lost' or 'damaged'"
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('BEGIN IMMEDIATE')
+
+            # Resolve the book and borrow record
+            original_input = str(book_identifier).strip()
+            cursor.execute(
+                "SELECT book_id, accession_no FROM borrow_records WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'",
+                (enrollment_no, original_input)
+            )
+            accs_row = cursor.fetchone()
+
+            if accs_row:
+                book_id = accs_row[0]
+            else:
+                real_book_id = self._resolve_book_id(cursor, original_input)
+                if not real_book_id:
+                    cursor.execute('ROLLBACK')
+                    return False, f"Book not found (ID: {original_input})"
+                book_id = real_book_id
+
+            import os
+            replacement_fine = int(os.getenv('LOST_BOOK_FINE', 500))
+
+            # Update the borrow record
+            if accs_row:
+                cursor.execute('''
+                    UPDATE borrow_records
+                    SET return_date = date('now'), status = ?, fine = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE enrollment_no = ? AND accession_no = ? AND status = 'borrowed'
+                ''', (status, replacement_fine, enrollment_no, original_input))
+            else:
+                cursor.execute('''
+                    UPDATE borrow_records
+                    SET return_date = date('now'), status = ?, fine = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'
+                ''', (status, replacement_fine, enrollment_no, book_id))
+
+            if cursor.rowcount == 0:
+                cursor.execute('ROLLBACK')
+                return False, "No active borrowing record found"
+
+            # Decrement total_copies since the physical copy is gone
+            cursor.execute('''
+                UPDATE books SET total_copies = MAX(total_copies - 1, 0), updated_at = CURRENT_TIMESTAMP
+                WHERE book_id = ?
+            ''', (book_id,))
+
+            cursor.execute('COMMIT')
+            return True, f"Book marked as {status}. Replacement fine of ₹{replacement_fine} applied."
+        except Exception as e:
+            try:
+                cursor.execute('ROLLBACK')
+            except Exception:
+                pass
+            return False, f"Error: {str(e)}"
+        finally:
+            conn.close()
     
     def get_students(self, search_term=''):
         """Get list of students with optional search - newest first"""

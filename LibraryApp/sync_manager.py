@@ -565,6 +565,21 @@ class SyncManager:
         """)
         remote_conn.commit()
 
+        # FIX 2.16: Create sync_conflicts table for conflict visibility
+        lc.execute("""
+            CREATE TABLE IF NOT EXISTS sync_conflicts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                natural_key TEXT NOT NULL,
+                local_updated_at TEXT,
+                remote_updated_at TEXT,
+                direction TEXT DEFAULT 'remote_to_local',
+                resolved TEXT DEFAULT 'local_wins',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        local_conn.commit()
+
     def _sync_deletions_local_to_remote(self, local_conn, remote_conn, allowed_tables=None):
         """Push local tombstones to remote and delete the corresponding remote rows."""
         allowed = set(allowed_tables) if allowed_tables else None
@@ -936,6 +951,15 @@ class SyncManager:
                                 local_ts = _parse_sync_timestamp(local_ts_raw)
                                 remote_ts = _parse_sync_timestamp(remote_ts_raw)
                                 if local_ts and remote_ts and remote_ts <= local_ts:
+                                    # FIX 2.16: Log the conflict instead of silently skipping
+                                    try:
+                                        conflict_key = json.dumps({k: str(row_dict.get(k, '')) for k in natural_key})
+                                        local_cursor.execute(
+                                            "INSERT INTO sync_conflicts (table_name, natural_key, local_updated_at, remote_updated_at, direction, resolved) VALUES (?, ?, ?, ?, 'remote_to_local', 'local_wins')",
+                                            (table_name, conflict_key, str(local_ts_raw), str(remote_ts_raw))
+                                        )
+                                    except Exception:
+                                        pass  # Don't let conflict logging break sync
                                     synced_count += 1
                                     continue
 
