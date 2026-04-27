@@ -147,6 +147,38 @@ CLEAR_WIPE_PASSWORD = "clear123"  # EASY default; change for production use
 ADMIN_USERNAME = "gpa"
 ADMIN_PASSWORD = "gpa123"
 
+
+# --- Admin API Helper: auto-inject X-Admin-Key header for portal admin calls ---
+import urllib.request as _urllib_request
+
+_ADMIN_SECRET_KEY = os.environ.get('ADMIN_SECRET', '').strip()
+
+
+def _admin_api_request(url, data=None, method=None, extra_headers=None, timeout=5):
+    """Create and execute a urllib request to a portal admin endpoint.
+
+    Automatically adds the X-Admin-Key header using the ADMIN_SECRET env var.
+    Returns the parsed JSON response dict.
+    Raises urllib.error.HTTPError / Exception on failure.
+    """
+    if data is not None and isinstance(data, (dict, list)):
+        data = json.dumps(data).encode('utf-8')
+    elif data is not None and isinstance(data, str):
+        data = data.encode('utf-8')
+
+    req = _urllib_request.Request(url, data=data, method=method)
+    if _ADMIN_SECRET_KEY:
+        req.add_header('X-Admin-Key', _ADMIN_SECRET_KEY)
+    if data is not None:
+        req.add_header('Content-Type', 'application/json')
+    if extra_headers:
+        for k, v in extra_headers.items():
+            req.add_header(k, v)
+
+    with _urllib_request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode())
+
+
 class LibraryApp:
     def _sync_runtime_settings_now(self):
         """Best-effort fast push of system settings to cloud (non-blocking)."""
@@ -15343,28 +15375,20 @@ Note: This is an automated email. Please find the attached formal overdue letter
     def _handle_request_action(self, req_id, action):
         """Handle approve/reject action for a request"""
         try:
-            import urllib.request
             import urllib.error
-            import json
             
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/requests/{req_id}/{action}"
 
-            # Bug 3 Fix: Use POST for state-changing operations (GET is semantically
-            # wrong and can be cached/replayed by proxies, causing double-actions).
-            # The portal's csrf_protect() skips /api/admin/ routes, so POST works fine.
-            req = urllib.request.Request(url, data=b'', method='POST')
-            req.add_header('Content-Type', 'application/json')
-
-            with urllib.request.urlopen(req, timeout=5) as response:
-                result = json.loads(response.read().decode())
-                if result.get('status') == 'success':
-                    messagebox.showinfo("Success", f"Request {action}d successfully!")
-                    self._refresh_portal_requests()
-                    # Refresh students list immediately if approved
-                    if action == 'approve':
-                        self.refresh_students()
-                else:
-                    messagebox.showerror("Error", result.get('message', 'Action failed'))
+            # Use POST for state-changing operations with admin auth header
+            result = _admin_api_request(url, data=b'', method='POST')
+            if result.get('status') == 'success':
+                messagebox.showinfo("Success", f"Request {action}d successfully!")
+                self._refresh_portal_requests()
+                # Refresh students list immediately if approved
+                if action == 'approve':
+                    self.refresh_students()
+            else:
+                messagebox.showerror("Error", result.get('message', 'Action failed'))
         except urllib.error.HTTPError as e:
             # Detailed error logging for 405/500 errors
             err_msg = f"HTTP {e.code}: {e.reason}"
@@ -15933,21 +15957,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 return
         
         try:
-            import urllib.request
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/deletion/{del_id}/{action}"
-            req = urllib.request.Request(url, method='POST', data=b'')
-            
-            with urllib.request.urlopen(req, timeout=5) as response:
-                result = json.loads(response.read().decode())
-                if result.get('status') == 'success':
-                    messagebox.showinfo("Success", result.get('message', f"Deletion {action}d!"))
-                    self._refresh_deletion_requests()
-                    # Refresh students list since student was removed from library DB
-                    if action == 'approve':
-                        self.refresh_students()
-                else:
-                    messagebox.showerror("Error", result.get('message', 'Action failed'))
+            result = _admin_api_request(url, data=b'', method='POST')
+            if result.get('status') == 'success':
+                messagebox.showinfo("Success", result.get('message', f"Deletion {action}d!"))
+                self._refresh_deletion_requests()
+                # Refresh students list since student was removed from library DB
+                if action == 'approve':
+                    self.refresh_students()
+            else:
+                messagebox.showerror("Error", result.get('message', 'Action failed'))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to {action} deletion: {str(e)}")
     
