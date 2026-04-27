@@ -795,10 +795,24 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # Check if student exists
-            cursor.execute("SELECT id FROM students WHERE enrollment_no = ?", (enrollment_no,))
-            if not cursor.fetchone():
+            # Check if student exists and get current year
+            cursor.execute("SELECT id, year FROM students WHERE enrollment_no = ?", (enrollment_no,))
+            existing = cursor.fetchone()
+            if not existing:
                 return False, "Student not found"
+            
+            # FIX 2.11 (E3): Block graduation if student has active loans
+            new_year = (year or '').strip().lower()
+            old_year = (existing[1] or '').strip().lower()
+            graduation_values = ('pass out', 'passout', 'passed out', 'alumni', 'graduate')
+            if new_year in graduation_values and old_year not in graduation_values:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed'",
+                    (enrollment_no,)
+                )
+                active_loans = cursor.fetchone()[0]
+                if active_loans > 0:
+                    return False, f"Cannot change to '{year}': Student has {active_loans} active loan(s). Please return all books first."
             
             # Update student information
             cursor.execute('''
@@ -807,7 +821,6 @@ class Database:
                 WHERE enrollment_no=?
             ''', (name, email, phone, department, year, enrollment_no))
             conn.commit()
-            return True, "Student updated successfully"
             return True, "Student updated successfully"
         except Exception as e:
             return False, f"Error: {str(e)}"
@@ -1198,7 +1211,7 @@ class Database:
             
             # Mark as notified
             portal_cursor.execute("""
-                UPDATE book_waitlist SET notified = 1 WHERE id = ?
+                UPDATE book_waitlist SET notified = 1, notified_at = CURRENT_TIMESTAMP WHERE id = ?
             """, (waitlist_id,))
             
             portal_conn.commit()
