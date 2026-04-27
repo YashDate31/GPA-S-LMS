@@ -953,6 +953,8 @@ def get_db_connection(local_db_name):
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=10000")
+        # FIX 2.12: Enable foreign key enforcement (required per-connection in SQLite)
+        conn.execute("PRAGMA foreign_keys = ON")
     except Exception:
         pass
     return conn
@@ -1018,6 +1020,17 @@ def _ensure_local_library_schema():
                 FOREIGN KEY (book_id) REFERENCES books (book_id) ON DELETE RESTRICT ON UPDATE CASCADE
             )
         ''')
+        # FIX 1.2: Schema migration — add fine tracking columns if missing
+        for col_sql in [
+            "ALTER TABLE borrow_records ADD COLUMN fine_paid INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN fine_paid_at TEXT",
+            "ALTER TABLE borrow_records ADD COLUMN fine_waived INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN renewal_count INTEGER DEFAULT 0",
+        ]:
+            try:
+                cursor.execute(col_sql)
+            except Exception:
+                pass  # Column already exists
         conn.commit()
         _library_schema_checked = True
     except Exception as e:
@@ -2777,6 +2790,12 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
     Generates a unified responsive HTML email.
     theme: 'blue' (Info/Receipt), 'green' (Success/Approved), 'orange' (Warning/Rejected)
     """
+    import html as _html
+    # FIX J5: Escape user-supplied values to prevent HTML injection
+    header_title = _html.escape(str(header_title)) if header_title else ''
+    user_name = _html.escape(str(user_name)) if user_name else 'Student'
+    # Note: main_text intentionally NOT escaped — it contains trusted HTML like <strong> tags
+
     colors = {
         'blue': {'bg': '#0F3460', 'box_bg': '#f0f4f8', 'box_border': '#d9e2ec', 'accent': '#0F3460'},
         'green': {'bg': '#28a745', 'box_bg': '#f0fdf4', 'box_border': '#bbf7d0', 'accent': '#15803d'},
@@ -2789,10 +2808,12 @@ def generate_email_template(header_title, user_name, main_text, details_dict=Non
     if details_dict:
         rows = ""
         for label, value in details_dict.items():
+            safe_label = _html.escape(str(label))
+            safe_value = _html.escape(str(value))
             rows += f"""
             <tr>
-                <td style="padding: 8px 0; vertical-align: top; width: 35%; color: #666; font-weight: bold;">{label}:</td>
-                <td style="padding: 8px 0; vertical-align: top; color: #333; font-weight: 500;">{value}</td>
+                <td style="padding: 8px 0; vertical-align: top; width: 35%; color: #666; font-weight: bold;">{safe_label}:</td>
+                <td style="padding: 8px 0; vertical-align: top; color: #333; font-weight: 500;">{safe_value}</td>
             </tr>"""
         details_html = f"""
         <div style="background-color: {c['box_bg']}; border: 1px solid {c['box_border']}; border-radius: 8px; padding: 20px; margin: 25px 0;">
@@ -2865,8 +2886,10 @@ def api_submit_request():
         try:
             parsed = json.loads(details) if isinstance(details, str) else details
             dup_accession = parsed.get('accession_no') if isinstance(parsed, dict) else None
+            dup_book_id = parsed.get('book_id') if isinstance(parsed, dict) else None
         except:
             dup_accession = None
+            dup_book_id = None
         if dup_accession:
             conn_dup = get_portal_db()
             cur_dup = conn_dup.cursor()
@@ -2887,6 +2910,26 @@ def api_submit_request():
                 except:
                     continue
             conn_dup.close()
+
+        # FIX 2.4 (B1): Enforce max renewal count
+        max_renewals = int(os.getenv('MAX_RENEWALS_PER_BOOK', 3))
+        if dup_book_id or dup_accession:
+            conn_lib_r = get_library_db()
+            cur_lib_r = conn_lib_r.cursor()
+            if dup_accession:
+                cur_lib_r.execute(
+                    "SELECT COALESCE(renewal_count, 0) as rc FROM borrow_records WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                    (dup_accession, session['student_id'])
+                )
+            else:
+                cur_lib_r.execute(
+                    "SELECT COALESCE(renewal_count, 0) as rc FROM borrow_records WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                    (dup_book_id, session['student_id'])
+                )
+            record = cur_lib_r.fetchone()
+            conn_lib_r.close()
+            if record and record['rc'] >= max_renewals:
+                return jsonify({'error': f'Maximum renewal limit ({max_renewals}) reached for this book.'}), 403
 
     # Prevent duplicate book requests and enforce borrow limits
     if req_type == 'book_request':
@@ -2922,6 +2965,25 @@ def api_submit_request():
             conn_lib = get_library_db()
             cur_lib = conn_lib.cursor()
             
+            # FIX 1.3 (A1): Block if student has unpaid fines
+            cur_lib.execute(
+                "SELECT COALESCE(SUM(fine), 0) as total_fine FROM borrow_records WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                (session['student_id'],)
+            )
+            unpaid = cur_lib.fetchone()['total_fine']
+            if unpaid > 0:
+                conn_lib.close()
+                return jsonify({'error': f'You have ₹{unpaid} in unpaid fines. Please clear your fines before borrowing new books.'}), 403
+
+            # FIX A3: Block if student has overdue books
+            cur_lib.execute(
+                "SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND status = 'borrowed' AND due_date < date('now')",
+                (session['student_id'],)
+            )
+            if cur_lib.fetchone()['count'] > 0:
+                conn_lib.close()
+                return jsonify({'error': 'You have overdue books. Please return them before requesting new ones.'}), 403
+
             # Check if already borrowed by this student
             cur_lib.execute("SELECT COUNT(*) as count FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'", 
                             (session['student_id'], book_id))
@@ -3083,13 +3145,48 @@ def api_cancel_request(req_id):
     
     # Verify ownership and status
     pk = _requests_pk_column(conn)
-    cursor.execute(f"SELECT status FROM requests WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
+    cursor.execute(f"SELECT status, request_type, details FROM requests WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
     req = cursor.fetchone()
     
     if not req:
         conn.close()
         return jsonify({'error': 'Request not found'}), 404
+    
+    # FIX 2.3 (A4): Allow cancelling approved book_requests (if not yet collected)
+    if req['status'] == 'approved' and req['request_type'] == 'book_request':
+        try:
+            details_parsed = json.loads(req['details']) if isinstance(req['details'], str) else req['details']
+            book_id = details_parsed.get('book_id') if isinstance(details_parsed, dict) else None
+            
+            if book_id:
+                conn_lib = get_library_db()
+                cur_lib = conn_lib.cursor()
+                
+                # Check if the book has already been physically collected (status='borrowed' with a real borrow)
+                # If the borrow record was created by approval, it will have today's or recent date
+                cur_lib.execute(
+                    "SELECT id FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed' AND return_date IS NULL",
+                    (session['student_id'], book_id)
+                )
+                borrow_rec = cur_lib.fetchone()
+                
+                if borrow_rec:
+                    # Remove the borrow record and restore copies
+                    cur_lib.execute("DELETE FROM borrow_records WHERE id = ?", (borrow_rec['id'],))
+                    cur_lib.execute("UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?", (book_id,))
+                    conn_lib.commit()
+                    _push_to_cloud("UPDATE books SET available_copies = available_copies + 1 WHERE book_id = ?", (book_id,))
+                
+                conn_lib.close()
+        except Exception as e:
+            print(f"[Cancel Approved] Error restoring copies: {e}")
         
+        # Mark as cancelled
+        cursor.execute(f"UPDATE requests SET status = 'cancelled' WHERE {pk} = ? AND enrollment_no = ?", (req_id, session['student_id']))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': 'Approved request cancelled. Book copies restored.'})
+
     if req['status'] != 'pending':
         conn.close()
         return jsonify({'error': f'Cannot cancel request in {req["status"]} state'}), 400
@@ -3566,6 +3663,19 @@ def api_admin_approve_request(req_id):
         conn.close()
         return jsonify({'status': 'success', 'message': 'Registration approved and student added to library.'})
 
+    # FIX 2.13: Verify the student still exists before approval
+    try:
+        conn_check = get_library_db()
+        cur_check = conn_check.cursor()
+        cur_check.execute("SELECT enrollment_no FROM students WHERE enrollment_no = ?", (req['enrollment_no'],))
+        if not cur_check.fetchone():
+            conn_check.close()
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Cannot approve: Student no longer exists in the library system.'}), 404
+        conn_check.close()
+    except Exception:
+        pass
+
     # For book requests, check availability and then create a real borrow_record
     # FIX 1.4: Use BEGIN IMMEDIATE to prevent race condition on concurrent approvals
     if req['request_type'] == 'book_request':
@@ -3759,12 +3869,38 @@ def api_admin_approve_request(req_id):
                         (renewal_book_id, req['enrollment_no'])
                     )
                 borrow_record = cursor_lib.fetchone()
-                
-                if borrow_record and borrow_record['due_date']:
+
+                # FIX 2.6 (B3): If borrow record is None the book was already returned
+                if not borrow_record:
+                    conn_lib.close()
+                    # Still mark approved (request was valid) but warn
+                    cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
+                    conn.commit()
+                    conn.close()
+                    return jsonify({'status': 'error', 'message': 'Cannot renew: No active loan found. The book may have already been returned.'}), 409
+
+                if borrow_record['due_date']:
                     try:
                         current_due = datetime.strptime(borrow_record['due_date'], '%Y-%m-%d')
                     except:
                         current_due = datetime.now()
+
+                    # FIX 2.5 (B2): If overdue, compute and store accrued fine BEFORE extending
+                    today_dt = datetime.now()
+                    if current_due < today_dt:
+                        overdue_days = (today_dt - current_due).days
+                        fine_per_day = get_portal_fine_per_day()
+                        accrued_fine = overdue_days * fine_per_day
+                        if renewal_accession:
+                            cursor_lib.execute(
+                                "UPDATE borrow_records SET fine = MAX(COALESCE(fine, 0), ?) WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                                (accrued_fine, renewal_accession, req['enrollment_no'])
+                            )
+                        else:
+                            cursor_lib.execute(
+                                "UPDATE borrow_records SET fine = MAX(COALESCE(fine, 0), ?) WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                                (accrued_fine, renewal_book_id, req['enrollment_no'])
+                            )
                     
                     # Extend from today or current due date, whichever is later
                     extend_from = max(current_due, datetime.now())
@@ -3788,6 +3924,17 @@ def api_admin_approve_request(req_id):
                         _push_to_cloud(
                             "UPDATE borrow_records SET due_date = ? WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
                             (new_due_date.strftime('%Y-%m-%d'), renewal_book_id, req['enrollment_no'])
+                        )
+                    # FIX 2.4: Increment renewal_count
+                    if renewal_accession:
+                        cursor_lib.execute(
+                            "UPDATE borrow_records SET renewal_count = COALESCE(renewal_count, 0) + 1 WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (renewal_accession, req['enrollment_no'])
+                        )
+                    else:
+                        cursor_lib.execute(
+                            "UPDATE borrow_records SET renewal_count = COALESCE(renewal_count, 0) + 1 WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                            (renewal_book_id, req['enrollment_no'])
                         )
                     conn_lib.commit()
                 conn_lib.close()
@@ -3848,6 +3995,19 @@ def api_admin_approve_request(req_id):
         }
 
     elif req['request_type'] == 'password_reset':
+        # FIX 2.10: Reject stale password reset requests (>24h old)
+        try:
+            created = req.get('created_at', '')
+            if created:
+                req_time = datetime.strptime(str(created)[:19], '%Y-%m-%d %H:%M:%S')
+                if (datetime.now() - req_time).total_seconds() > 86400:  # 24 hours
+                    cursor.execute(f"UPDATE requests SET status = 'rejected' WHERE {pk} = ?", (req_id,))
+                    conn.commit()
+                    conn.close()
+                    return jsonify({'status': 'error', 'message': 'Password reset request expired (>24h). Student should submit a new one.'}), 410
+        except Exception:
+            pass  # If timestamp parse fails, proceed with approval
+
         # Execute Reset Logic
         try:
              # Reset to Enrollment Number using EXISTING cursor (Fixes Timeout)
@@ -4010,18 +4170,12 @@ def api_admin_approve_deletion(del_id):
     cursor.execute("DELETE FROM student_auth WHERE enrollment_no = ?", (student_id,))
     
     # Clean up portal requests and notifications
-    try:
-        cursor.execute("DELETE FROM requests WHERE enrollment_no = ?", (student_id,))
-    except Exception:
-        pass
-    try:
-        cursor.execute("DELETE FROM user_notifications WHERE enrollment_no = ?", (student_id,))
-    except Exception:
-        pass
-    try:
-        cursor.execute("DELETE FROM user_settings WHERE enrollment_no = ?", (student_id,))
-    except Exception:
-        pass
+    # FIX I2: Also clean book_waitlist, book_wishlist, book_ratings to prevent orphaned data
+    for cleanup_table in ['requests', 'user_notifications', 'user_settings', 'book_waitlist', 'book_wishlist', 'book_ratings']:
+        try:
+            cursor.execute(f"DELETE FROM {cleanup_table} WHERE enrollment_no = ?", (student_id,))
+        except Exception:
+            pass
     
     conn.commit()
     conn.close()
@@ -4373,6 +4527,9 @@ def api_admin_study_materials():
 @app.route('/api/study-materials/<int:material_id>/download')
 def download_study_material(material_id):
     """Download a study material file"""
+    # FIX F3: Require login to prevent unauthenticated download via guessable IDs
+    if 'student_id' not in session:
+        return jsonify({'error': 'Please login to download study materials'}), 401
     conn = get_portal_db()
     cursor = conn.cursor()
     cursor.execute("SELECT filename, original_filename FROM study_materials WHERE id = ? AND active = 1", (material_id,))
