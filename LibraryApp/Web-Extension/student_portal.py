@@ -699,6 +699,10 @@ def _log_writer_loop():
             continue
         
         if batch:
+            # FIX H5: On Render, also emit to stdout so logs survive ephemeral FS
+            if os.environ.get('RENDER'):
+                for endpoint, method, status in batch:
+                    print(f"[ACCESS] {method} {endpoint} -> {status}")
             try:
                 conn = get_portal_db()
                 cursor = conn.cursor()
@@ -1079,6 +1083,7 @@ def _ensure_local_library_schema():
             "ALTER TABLE borrow_records ADD COLUMN fine_paid_at TEXT",
             "ALTER TABLE borrow_records ADD COLUMN fine_waived INTEGER DEFAULT 0",
             "ALTER TABLE borrow_records ADD COLUMN renewal_count INTEGER DEFAULT 0",
+            "ALTER TABLE borrow_records ADD COLUMN fine_rate_at_borrow INTEGER",  # FIX C2
         ]:
             try:
                 cursor.execute(col_sql)
@@ -4021,6 +4026,22 @@ def api_admin_approve_request(req_id):
                     conn.close()
                     return jsonify({'status': 'error', 'message': 'Cannot renew: No active loan found. The book may have already been returned.'}), 409
 
+                # FIX B4: Warn librarian if others are waiting on the waitlist
+                _waitlist_warning = ''
+                try:
+                    conn_wl = get_portal_db()
+                    cur_wl = conn_wl.cursor()
+                    cur_wl.execute(
+                        "SELECT COUNT(*) as cnt FROM book_waitlist WHERE book_id = ? AND notified = 0",
+                        (renewal_book_id,)
+                    )
+                    wl_count = cur_wl.fetchone()['cnt']
+                    conn_wl.close()
+                    if wl_count > 0:
+                        _waitlist_warning = f' (Note: {wl_count} student(s) are on the waitlist for this book)'
+                except Exception:
+                    pass
+
                 if borrow_record['due_date']:
                     try:
                         current_due = datetime.strptime(borrow_record['due_date'], '%Y-%m-%d')
@@ -4185,7 +4206,12 @@ def api_admin_approve_request(req_id):
     conn.commit()
     conn.close()
 
-    return jsonify({'status': 'success', 'message': 'Request approved'})
+    # Include waitlist warning in response if set during renewal
+    msg = 'Request approved'
+    wl_warn = locals().get('_waitlist_warning', '')
+    if wl_warn:
+        msg += wl_warn
+    return jsonify({'status': 'success', 'message': msg})
 
 @app.route('/api/admin/requests/<int:req_id>/reject', methods=['GET', 'POST'])
 def api_admin_reject_request(req_id):
