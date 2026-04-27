@@ -543,10 +543,40 @@ CSRF_EXCLUDED_ENDPOINTS = [
     '/api/request',  # Student requests (session-protected)
     '/api/settings',  # Settings update (session-protected)
     '/api/request-deletion',  # Deletion request (session-protected)
-    '/api/admin/notices',  # Desktop app access
-    '/api/admin/requests',  # Desktop app access
-    '/api/admin/deletion',  # Desktop app access
 ]
+
+# --- Admin Authentication (shared secret between portal and desktop app) ---
+_ADMIN_SECRET = os.environ.get('ADMIN_SECRET', '').strip()
+
+
+def _check_admin_auth():
+    """Validate admin API key on every /api/admin/ request.
+
+    The desktop app must send the header  X-Admin-Key: <ADMIN_SECRET>.
+    If ADMIN_SECRET env-var is empty the guard is disabled (local-dev only).
+    Returns a (response, status) tuple on failure, or None on success.
+    """
+    if not _ADMIN_SECRET:
+        # No secret configured — allow (local dev / legacy behaviour).
+        # WARNING: On production (Render) ADMIN_SECRET *must* be set.
+        return None
+    key = request.headers.get('X-Admin-Key', '').strip()
+    if key != _ADMIN_SECRET:
+        return jsonify({
+            'status': 'error',
+            'message': 'Admin authentication failed. Missing or invalid X-Admin-Key header.'
+        }), 403
+    return None
+
+
+@app.before_request
+def admin_auth_gate():
+    """Enforce admin secret on all /api/admin/ endpoints."""
+    if not request.path.startswith('/api/admin/'):
+        return
+    result = _check_admin_auth()
+    if result is not None:
+        return result
 
 
 @app.before_request
@@ -560,7 +590,7 @@ def csrf_protect():
     if request.path in CSRF_EXCLUDED_ENDPOINTS:
         return
     
-    # Skip for admin endpoints (desktop app access only)
+    # Skip for admin endpoints — they are protected by X-Admin-Key instead
     if request.path.startswith('/api/admin/'):
         return
     
@@ -3536,7 +3566,8 @@ def api_admin_approve_request(req_id):
         conn.close()
         return jsonify({'status': 'success', 'message': 'Registration approved and student added to library.'})
 
-    # For book requests, check availability and then create a real borrow_record (Bug 1 fix)
+    # For book requests, check availability and then create a real borrow_record
+    # FIX 1.4: Use BEGIN IMMEDIATE to prevent race condition on concurrent approvals
     if req['request_type'] == 'book_request':
         try:
             details = json.loads(req['details']) if req['details'] else {}
@@ -3544,18 +3575,43 @@ def api_admin_approve_request(req_id):
             if book_id:
                 conn_lib = get_library_db()
                 cursor_lib = conn_lib.cursor()
-                cursor_lib.execute("SELECT available_copies FROM books WHERE book_id = ?", (book_id,))
+
+                # --- Race-safe: atomic check-and-decrement ---
+                # BEGIN IMMEDIATE acquires a reserved lock immediately, blocking
+                # any concurrent writer until this transaction commits/rolls back.
+                if _is_postgres_connection(conn_lib):
+                    # PostgreSQL: use FOR UPDATE row-level lock
+                    cursor_lib.execute(
+                        "SELECT available_copies FROM books WHERE book_id = %s FOR UPDATE",
+                        (book_id,)
+                    )
+                else:
+                    # SQLite: escalate to a write-lock before reading
+                    try:
+                        conn_lib.execute("BEGIN IMMEDIATE")
+                    except Exception:
+                        pass  # Already in a transaction in some edge cases
+                    cursor_lib.execute(
+                        "SELECT available_copies FROM books WHERE book_id = ?",
+                        (book_id,)
+                    )
+
                 book_row = cursor_lib.fetchone()
 
                 if book_row:
                     actual_available = book_row['available_copies']
 
                     if actual_available <= 0:
+                        # Rollback the IMMEDIATE transaction before closing
+                        try:
+                            conn_lib.rollback()
+                        except Exception:
+                            pass
                         conn_lib.close()
                         conn.close()
                         return jsonify({'status': 'error', 'message': 'Cannot approve: No available copies left in the library.'}), 400
 
-                    # --- Bug 1 Fix: Create borrow_record + decrement available_copies ---
+                    # --- Create borrow_record + decrement available_copies (within lock) ---
                     borrow_date = datetime.now().strftime('%Y-%m-%d')
                     due_date = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d')
                     enrollment_no = _normalize_enrollment(req['enrollment_no'])
@@ -3583,7 +3639,17 @@ def api_admin_approve_request(req_id):
                         )
                         print(f"[book_request approve] Created borrow_record for {enrollment_no} / {book_id}")
                     except Exception as br_err:
+                        try:
+                            conn_lib.rollback()
+                        except Exception:
+                            pass
                         print(f"[book_request approve] Failed to create borrow_record: {br_err}")
+                else:
+                    # book_id not found — rollback lock
+                    try:
+                        conn_lib.rollback()
+                    except Exception:
+                        pass
                 conn_lib.close()
         except Exception as e:
             print(f"[book_request approve] Outer error: {e}")
