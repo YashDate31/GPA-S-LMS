@@ -12787,22 +12787,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            import json
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/notices"
-            data = json.dumps({"title": title, "message": msg}).encode('utf-8')
-            req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
-            
-            with urllib.request.urlopen(req, timeout=1) as response:
-                res = json.loads(response.read().decode())
-                if res['status'] == 'success':
-                    messagebox.showinfo("Success", "Notice posted successfully!")
-                    self.notice_title.delete(0, tk.END)
-                    self.notice_msg.delete("1.0", tk.END)
-                    self._refresh_notices()
-                else:
-                    messagebox.showerror("Error", res.get('message', 'Failed to post'))
+            res = _admin_api_request(url, data={"title": title, "message": msg}, method='POST', timeout=1)
+            if res['status'] == 'success':
+                messagebox.showinfo("Success", "Notice posted successfully!")
+                self.notice_title.delete(0, tk.END)
+                self.notice_msg.delete("1.0", tk.END)
+                self._refresh_notices()
+            else:
+                messagebox.showerror("Error", res.get('message', 'Failed to post'))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to post notice: {e}")
 
@@ -12868,14 +12861,9 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
             
         try:
-            import urllib.request
-            import json
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/notices/{notice_id}"
-            req = urllib.request.Request(url, method='DELETE')
-            
-            with urllib.request.urlopen(req, timeout=1) as response:
-                self._refresh_notices()
+            _admin_api_request(url, method='DELETE', timeout=1)
+            self._refresh_notices()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete: {e}")
         
@@ -14239,10 +14227,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
     def _show_portal_stats(self):
         """Show portal statistics"""
         try:
-            import urllib.request
-            import json
-            response = urllib.request.urlopen(f"http://127.0.0.1:{self.portal_port}/api/admin/stats", timeout=3)
-            stats = json.loads(response.read().decode())
+            stats = _admin_api_request(f"http://127.0.0.1:{self.portal_port}/api/admin/stats", timeout=3)
             
             # Parse request stats
             requests = stats.get('requests', {})
@@ -14928,50 +14913,44 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            import urllib.error
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/all-requests"
-            req = urllib.request.Request(url)
+            data = _admin_api_request(url, timeout=10)
+            requests_list = data.get('requests', [])
+            deletion_requests = data.get('deletion_requests', [])
             
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode())
-                requests_list = data.get('requests', [])
-                deletion_requests = data.get('deletion_requests', [])
+            # Debug: Log what we received
+            print(f"[Requests Tab] Loaded {len(requests_list)} pending requests, {len(deletion_requests)} deletion requests")
+            
+            # Store all requests for filtering
+            self.all_pending_requests = requests_list.copy()
+            
+            # Update stats by type (always show full stats)
+            if hasattr(self, 'request_stats_labels'):
+                type_counts = {}
+                service_count = 0
+                known_types = ['student_registration', 'password_reset', 'profile_update', 
+                               'book_request', 'renewal', 'extension']
                 
-                # Debug: Log what we received
-                print(f"[Requests Tab] Loaded {len(requests_list)} pending requests, {len(deletion_requests)} deletion requests")
+                for req_data in requests_list:
+                    req_type = req_data.get('request_type', 'other')
+                    if req_type in known_types:
+                        type_counts[req_type] = type_counts.get(req_type, 0) + 1
+                    else:
+                        # Count as service request
+                        service_count += 1
                 
-                # Store all requests for filtering
-                self.all_pending_requests = requests_list.copy()
+                type_counts['service'] = service_count
                 
-                # Update stats by type (always show full stats)
-                if hasattr(self, 'request_stats_labels'):
-                    type_counts = {}
-                    service_count = 0
-                    known_types = ['student_registration', 'password_reset', 'profile_update', 
-                                   'book_request', 'renewal', 'extension']
-                    
-                    for req_data in requests_list:
-                        req_type = req_data.get('request_type', 'other')
-                        if req_type in known_types:
-                            type_counts[req_type] = type_counts.get(req_type, 0) + 1
-                        else:
-                            # Count as service request
-                            service_count += 1
-                    
-                    type_counts['service'] = service_count
-                    
-                    # Get rejected count from API response
-                    rejected_count = data.get('rejected_count', 0)
-                    type_counts['rejected'] = rejected_count
-                    
-                    for key, label in self.request_stats_labels.items():
-                        label.config(text=str(type_counts.get(key, 0)))
+                # Get rejected count from API response
+                rejected_count = data.get('rejected_count', 0)
+                type_counts['rejected'] = rejected_count
                 
-                # Apply current filters
-                self._apply_request_filters()
-                    
+                for key, label in self.request_stats_labels.items():
+                    label.config(text=str(type_counts.get(key, 0)))
+            
+            # Apply current filters
+            self._apply_request_filters()
+                
         except Exception as e:
             self._show_empty_message(self.requests_container, "Could not load requests", f"Portal server may not be running.\n{str(e)}")
 
@@ -15021,8 +15000,6 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            import urllib.error
             import urllib.parse
             
             # Prepare params
@@ -15036,39 +15013,36 @@ Note: This is an automated email. Please find the attached formal overdue letter
             q = urllib.parse.quote(self.request_search_var.get().strip()) if hasattr(self, 'request_search_var') else ""
             
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/request-history?q={q}&days={days}"
-            req = urllib.request.Request(url)
+            data = _admin_api_request(url, timeout=5)
+            history_list = data.get('history', [])
+            counts = data.get('counts', {})
             
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                history_list = data.get('history', [])
-                counts = data.get('counts', {})
+            # Update count badge to show total history
+            if hasattr(self, 'requests_count_badge'):
+                self.requests_count_badge.config(text=str(counts.get('total', 0)), bg='#6c757d')
+            
+            # Update stats labels
+            if hasattr(self, 'request_stats_labels'):
+                # Reset all to 0, then show approved/rejected in appropriate slots
+                for key in self.request_stats_labels:
+                    self.request_stats_labels[key].config(text="0")
+                if 'rejected' in self.request_stats_labels:
+                    self.request_stats_labels['rejected'].config(text=str(counts.get('rejected', 0)))
+            
+            if not history_list:
+                self._show_empty_message(self.requests_container, "No request history", "No processed requests found.")
+                return
+            
+            # Create two-column grid layout
+            self.requests_container.columnconfigure(0, weight=1)
+            self.requests_container.columnconfigure(1, weight=1)
+            
+            # Place history cards
+            for idx, req_data in enumerate(history_list):
+                row = idx // 2
+                col = idx % 2
+                self._create_history_card(self.requests_container, req_data, row, col, idx + 1)
                 
-                # Update count badge to show total history
-                if hasattr(self, 'requests_count_badge'):
-                    self.requests_count_badge.config(text=str(counts.get('total', 0)), bg='#6c757d')
-                
-                # Update stats labels
-                if hasattr(self, 'request_stats_labels'):
-                    # Reset all to 0, then show approved/rejected in appropriate slots
-                    for key in self.request_stats_labels:
-                        self.request_stats_labels[key].config(text="0")
-                    if 'rejected' in self.request_stats_labels:
-                        self.request_stats_labels['rejected'].config(text=str(counts.get('rejected', 0)))
-                
-                if not history_list:
-                    self._show_empty_message(self.requests_container, "No request history", "No processed requests found.")
-                    return
-                
-                # Create two-column grid layout
-                self.requests_container.columnconfigure(0, weight=1)
-                self.requests_container.columnconfigure(1, weight=1)
-                
-                # Place history cards
-                for idx, req_data in enumerate(history_list):
-                    row = idx // 2
-                    col = idx % 2
-                    self._create_history_card(self.requests_container, req_data, row, col, idx + 1)
-                    
         except Exception as e:
             self._show_empty_message(self.requests_container, "Could not load history", str(e))
     
@@ -15603,44 +15577,39 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/all-requests"
-            req = urllib.request.Request(url)
+            data = _admin_api_request(url, timeout=5)
+            deletions = data.get('deletion_requests', [])
             
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                deletions = data.get('deletion_requests', [])
+            # Update count badge
+            if hasattr(self, 'deletion_count_badge'):
+                self.deletion_count_badge.config(text=str(len(deletions)))
+            
+            # Get deletion stats from separate query
+            if hasattr(self, 'deletion_stats_labels'):
+                deletion_counts = data.get('deletion_counts', {})
+                self.deletion_stats_labels['pending'].config(text=str(len(deletions)))
+                self.deletion_stats_labels['approved'].config(text=str(deletion_counts.get('approved', 0)))
+                self.deletion_stats_labels['rejected'].config(text=str(deletion_counts.get('rejected', 0)))
+            
+            if not deletions:
+                self._show_empty_message(self.deletion_container, "No deletion requests", "No students have requested account deletion. 🎉")
+                return
+            
+            # Create two-column grid layout
+            self.deletion_container.columnconfigure(0, weight=1)
+            self.deletion_container.columnconfigure(1, weight=1)
+            
+            # Place cards in grid
+            for idx, del_data in enumerate(deletions):
+                row = idx // 2
+                col = idx % 2
+                self._create_deletion_card(self.deletion_container, del_data, row, col, idx + 1)
+            
+            # Bind mousewheel to all new cards
+            if hasattr(self, '_bind_deletion_mousewheel'):
+                self._bind_deletion_mousewheel(self.deletion_container)
                 
-                # Update count badge
-                if hasattr(self, 'deletion_count_badge'):
-                    self.deletion_count_badge.config(text=str(len(deletions)))
-                
-                # Get deletion stats from separate query
-                if hasattr(self, 'deletion_stats_labels'):
-                    deletion_counts = data.get('deletion_counts', {})
-                    self.deletion_stats_labels['pending'].config(text=str(len(deletions)))
-                    self.deletion_stats_labels['approved'].config(text=str(deletion_counts.get('approved', 0)))
-                    self.deletion_stats_labels['rejected'].config(text=str(deletion_counts.get('rejected', 0)))
-                
-                if not deletions:
-                    self._show_empty_message(self.deletion_container, "No deletion requests", "No students have requested account deletion. 🎉")
-                    return
-                
-                # Create two-column grid layout
-                self.deletion_container.columnconfigure(0, weight=1)
-                self.deletion_container.columnconfigure(1, weight=1)
-                
-                # Place cards in grid
-                for idx, del_data in enumerate(deletions):
-                    row = idx // 2
-                    col = idx % 2
-                    self._create_deletion_card(self.deletion_container, del_data, row, col, idx + 1)
-                
-                # Bind mousewheel to all new cards
-                if hasattr(self, '_bind_deletion_mousewheel'):
-                    self._bind_deletion_mousewheel(self.deletion_container)
-                    
         except Exception as e:
             self._show_empty_message(self.deletion_container, "Could not load requests", str(e))
     def _toggle_deletion_history(self):
@@ -15672,8 +15641,6 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            import urllib.error
             import urllib.parse
             
             # Prepare params
@@ -15687,41 +15654,38 @@ Note: This is an automated email. Please find the attached formal overdue letter
             q = urllib.parse.quote(self.deletion_search_var.get().strip()) if hasattr(self, 'deletion_search_var') else ""
             
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/deletion-history?q={q}&days={days}"
-            req = urllib.request.Request(url)
+            data = _admin_api_request(url, timeout=5)
+            history_list = data.get('history', [])
+            counts = data.get('counts', {})
             
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                history_list = data.get('history', [])
-                counts = data.get('counts', {})
+            # Update count badge to show total history
+            if hasattr(self, 'deletion_count_badge'):
+                self.deletion_count_badge.config(text=str(counts.get('total', 0)), bg='#6c757d')
+            
+            # Update stats labels
+            if hasattr(self, 'deletion_stats_labels'):
+                self.deletion_stats_labels['pending'].config(text="0")
+                self.deletion_stats_labels['approved'].config(text=str(counts.get('approved', 0)))
+                self.deletion_stats_labels['rejected'].config(text=str(counts.get('rejected', 0)))
+            
+            if not history_list:
+                self._show_empty_message(self.deletion_container, "No deletion history", "No processed deletion requests found.")
+                return
+            
+            # Create two-column grid layout
+            self.deletion_container.columnconfigure(0, weight=1)
+            self.deletion_container.columnconfigure(1, weight=1)
+            
+            # Place history cards
+            for idx, del_data in enumerate(history_list):
+                row = idx // 2
+                col = idx % 2
+                self._create_deletion_history_card(self.deletion_container, del_data, row, col, idx + 1)
+            
+            # Bind mousewheel to all new cards
+            if hasattr(self, '_bind_deletion_mousewheel'):
+                self._bind_deletion_mousewheel(self.deletion_container)
                 
-                # Update count badge to show total history
-                if hasattr(self, 'deletion_count_badge'):
-                    self.deletion_count_badge.config(text=str(counts.get('total', 0)), bg='#6c757d')
-                
-                # Update stats labels
-                if hasattr(self, 'deletion_stats_labels'):
-                    self.deletion_stats_labels['pending'].config(text="0")
-                    self.deletion_stats_labels['approved'].config(text=str(counts.get('approved', 0)))
-                    self.deletion_stats_labels['rejected'].config(text=str(counts.get('rejected', 0)))
-                
-                if not history_list:
-                    self._show_empty_message(self.deletion_container, "No deletion history", "No processed deletion requests found.")
-                    return
-                
-                # Create two-column grid layout
-                self.deletion_container.columnconfigure(0, weight=1)
-                self.deletion_container.columnconfigure(1, weight=1)
-                
-                # Place history cards
-                for idx, del_data in enumerate(history_list):
-                    row = idx // 2
-                    col = idx % 2
-                    self._create_deletion_history_card(self.deletion_container, del_data, row, col, idx + 1)
-                
-                # Bind mousewheel to all new cards
-                if hasattr(self, '_bind_deletion_mousewheel'):
-                    self._bind_deletion_mousewheel(self.deletion_container)
-                    
         except Exception as e:
             self._show_empty_message(self.deletion_container, "Could not load history", str(e))
     
@@ -16308,18 +16272,13 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/password-reset/{enrollment}"
-            req = urllib.request.Request(url, method='POST', data=b'')
-            
-            with urllib.request.urlopen(req, timeout=5) as response:
-                result = json.loads(response.read().decode())
-                if result.get('status') == 'success':
-                    messagebox.showinfo("Success", result.get('message', 'Password reset successfully!'))
-                    self.password_reset_enrollment.delete(0, tk.END)
-                else:
-                    messagebox.showerror("Error", result.get('message', 'Reset failed'))
+            result = _admin_api_request(url, data=b'', method='POST')
+            if result.get('status') == 'success':
+                messagebox.showinfo("Success", result.get('message', 'Password reset successfully!'))
+                self.password_reset_enrollment.delete(0, tk.END)
+            else:
+                messagebox.showerror("Error", result.get('message', 'Reset failed'))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to reset password: {str(e)}")
         
@@ -16419,18 +16378,13 @@ Note: This is an automated email. Please find the attached formal overdue letter
             return
         
         try:
-            import urllib.request
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/password-reset/{enrollment}"
-            req = urllib.request.Request(url, method='POST', data=b'')
-            
-            with urllib.request.urlopen(req, timeout=5) as response:
-                result = json.loads(response.read().decode())
-                if result.get('status') == 'success':
-                    messagebox.showinfo("Success", f"Password reset for {enrollment}!")
-                    self._refresh_auth_stats()
-                else:
-                    messagebox.showerror("Error", result.get('message', 'Reset failed'))
+            result = _admin_api_request(url, data=b'', method='POST')
+            if result.get('status') == 'success':
+                messagebox.showinfo("Success", f"Password reset for {enrollment}!")
+                self._refresh_auth_stats()
+            else:
+                messagebox.showerror("Error", result.get('message', 'Reset failed'))
         except Exception as e:
             messagebox.showerror("Error", f"Failed: {str(e)}")
     
@@ -16481,24 +16435,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 return
             
             # Perform bulk reset via API
-            import urllib.request
-            import urllib.parse
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/bulk-password-reset"
-            data = json.dumps({'year': db_year}).encode('utf-8')
-            req = urllib.request.Request(url, method='POST', data=data, 
-                                         headers={'Content-Type': 'application/json'})
-            
-            with urllib.request.urlopen(req, timeout=30) as response:
-                result = json.loads(response.read().decode())
-                if result.get('status') == 'success':
-                    reset_count = result.get('count', count)
-                    messagebox.showinfo("✅ Bulk Reset Complete", 
-                        f"Successfully reset {reset_count} passwords!\n\n"
-                        "Students will be prompted to change on next login.")
-                    self._refresh_auth_stats()
-                else:
-                    messagebox.showerror("Error", result.get('message', 'Bulk reset failed'))
+            result = _admin_api_request(url, data={'year': db_year}, method='POST', timeout=30)
+            if result.get('status') == 'success':
+                reset_count = result.get('count', count)
+                messagebox.showinfo("✅ Bulk Reset Complete", 
+                    f"Successfully reset {reset_count} passwords!\n\n"
+                    "Students will be prompted to change on next login.")
+                self._refresh_auth_stats()
+            else:
+                messagebox.showerror("Error", result.get('message', 'Bulk reset failed'))
                     
         except Exception as e:
             messagebox.showerror("Error", f"Failed to perform bulk reset: {str(e)}")
@@ -16510,66 +16456,61 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
 
         try:
-            import urllib.request
-            
             url = f"http://127.0.0.1:{self.portal_port}/api/admin/auth-stats"
-            req = urllib.request.Request(url)
+            data = _admin_api_request(url, timeout=5)
+            stats = data.get('stats', {})
+            resets = data.get('recent_resets', [])
             
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                stats = data.get('stats', {})
-                resets = data.get('recent_resets', [])
+            # Update stats labels
+            if hasattr(self, 'auth_stats_labels'):
+                self.auth_stats_labels['total_registered'].config(text=str(stats.get('total_registered', 0)))
+                self.auth_stats_labels['active_users'].config(text=str(stats.get('active_users', 0)))
+                self.auth_stats_labels['pending_change'].config(text=str(stats.get('pending_change', 0)))
+            
+            # Update recent resets list
+            if hasattr(self, 'recent_resets_container'):
+                for w in self.recent_resets_container.winfo_children():
+                    w.destroy()
                 
-                # Update stats labels
-                if hasattr(self, 'auth_stats_labels'):
-                    self.auth_stats_labels['total_registered'].config(text=str(stats.get('total_registered', 0)))
-                    self.auth_stats_labels['active_users'].config(text=str(stats.get('active_users', 0)))
-                    self.auth_stats_labels['pending_change'].config(text=str(stats.get('pending_change', 0)))
-                
-                # Update recent resets list
-                if hasattr(self, 'recent_resets_container'):
-                    for w in self.recent_resets_container.winfo_children():
-                        w.destroy()
-                    
-                    if not resets:
+                if not resets:
+                    tk.Label(
+                        self.recent_resets_container,
+                        text="No recent password resets",
+                        font=('Segoe UI', 10),
+                        bg='#f8f9fa',
+                        fg='#888'
+                    ).pack(pady=20)
+                else:
+                    for reset in resets[:8]:  # Show max 8
+                        row = tk.Frame(self.recent_resets_container, bg='#f8f9fa')
+                        row.pack(fill=tk.X, pady=3)
+                        
                         tk.Label(
-                            self.recent_resets_container,
-                            text="No recent password resets",
-                            font=('Segoe UI', 10),
+                            row,
+                            text=f"👤 {reset.get('student_name', 'Unknown')}",
+                            font=('Segoe UI', 9),
                             bg='#f8f9fa',
-                            fg='#888'
-                        ).pack(pady=20)
-                    else:
-                        for reset in resets[:8]:  # Show max 8
-                            row = tk.Frame(self.recent_resets_container, bg='#f8f9fa')
-                            row.pack(fill=tk.X, pady=3)
-                            
+                            fg='#333'
+                        ).pack(side=tk.LEFT)
+                        
+                        tk.Label(
+                            row,
+                            text=f"({reset.get('enrollment_no', '')})",
+                            font=('Segoe UI', 8),
+                            bg='#f8f9fa',
+                            fg='#666'
+                        ).pack(side=tk.LEFT, padx=5)
+                        
+                        timestamp = reset.get('last_changed', '')
+                        if timestamp:
                             tk.Label(
                                 row,
-                                text=f"👤 {reset.get('student_name', 'Unknown')}",
-                                font=('Segoe UI', 9),
-                                bg='#f8f9fa',
-                                fg='#333'
-                            ).pack(side=tk.LEFT)
-                            
-                            tk.Label(
-                                row,
-                                text=f"({reset.get('enrollment_no', '')})",
+                                text=timestamp[:16],  # Trim to date/time
                                 font=('Segoe UI', 8),
                                 bg='#f8f9fa',
-                                fg='#666'
-                            ).pack(side=tk.LEFT, padx=5)
-                            
-                            timestamp = reset.get('last_changed', '')
-                            if timestamp:
-                                tk.Label(
-                                    row,
-                                    text=timestamp[:16],  # Trim to date/time
-                                    font=('Segoe UI', 8),
-                                    bg='#f8f9fa',
-                                    fg='#888'
-                                ).pack(side=tk.RIGHT)
-                    
+                                fg='#888'
+                            ).pack(side=tk.RIGHT)
+                
         except Exception as e:
             # Silently fail - stats will just show 0
             pass
