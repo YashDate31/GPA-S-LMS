@@ -1378,6 +1378,7 @@ def init_portal_db():
     for migration_sql in [
         "ALTER TABLE book_waitlist ADD COLUMN notified_at TEXT",
         "ALTER TABLE study_materials ADD COLUMN drive_link TEXT",
+        "ALTER TABLE requests ADD COLUMN approved_at TEXT",  # FIX 2.1: collection deadline
     ]:
         try:
             cursor.execute(migration_sql)
@@ -1418,6 +1419,107 @@ init_portal_db()
 
 # Run cleanup on startup (after all functions are defined)
 threading.Thread(target=cleanup_logs, daemon=True).start()
+
+
+# --- FIX 2.1 (A2): Collection Deadline Expiry Worker ---
+_COLLECTION_DEADLINE_HOURS = int(os.environ.get('COLLECTION_DEADLINE_HOURS', 48))
+
+def _collection_deadline_worker():
+    """Background thread: auto-cancel approved book_requests not collected within the deadline.
+
+    Runs every 30 minutes.  For each expired approved book_request:
+    1. Marks the request as 'expired'
+    2. Removes the corresponding borrow_record (if it exists)
+    3. Restores available_copies on the book
+    4. Notifies the student
+    5. Triggers waitlist notification for the freed copy
+    """
+    import time as _time
+    _time.sleep(60)  # Initial delay: let the app fully boot
+
+    while True:
+        try:
+            conn = get_portal_db()
+            cursor = conn.cursor()
+
+            pk = _requests_pk_column(conn)
+
+            # Find approved book_requests that exceeded the collection deadline
+            cutoff = (datetime.now() - timedelta(hours=_COLLECTION_DEADLINE_HOURS)).strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute(f"""
+                SELECT {pk}, enrollment_no, details, approved_at
+                FROM requests
+                WHERE status = 'approved'
+                  AND request_type = 'book_request'
+                  AND approved_at IS NOT NULL
+                  AND approved_at < ?
+            """, (cutoff,))
+            expired_rows = cursor.fetchall()
+
+            expired_count = 0
+            for row in expired_rows:
+                req_pk = row[pk] if isinstance(row, dict) else row[0]
+                enrollment_no = row['enrollment_no'] if isinstance(row, dict) else row[1]
+                details_raw = row['details'] if isinstance(row, dict) else row[2]
+
+                try:
+                    details = json.loads(details_raw) if details_raw else {}
+                    book_id = details.get('book_id')
+                    book_title = details.get('title', 'Unknown Book')
+                except Exception:
+                    book_id = None
+                    book_title = 'Unknown Book'
+
+                # 1. Mark request as expired
+                cursor.execute(f"UPDATE requests SET status = 'expired' WHERE {pk} = ?", (req_pk,))
+
+                # 2. Remove the auto-created borrow_record and restore available_copies
+                if book_id:
+                    try:
+                        conn_lib = get_library_db()
+                        cursor_lib = conn_lib.cursor()
+                        cursor_lib.execute(
+                            "DELETE FROM borrow_records WHERE enrollment_no = ? AND book_id = ? AND status = 'borrowed'",
+                            (enrollment_no, book_id)
+                        )
+                        if cursor_lib.rowcount > 0:
+                            cursor_lib.execute(
+                                "UPDATE books SET available_copies = MIN(available_copies + 1, total_copies) WHERE book_id = ?",
+                                (book_id,)
+                            )
+                        conn_lib.commit()
+                        conn_lib.close()
+                    except Exception as lib_err:
+                        print(f"[Collection Deadline] Library cleanup error for {book_id}: {lib_err}")
+
+                # 3. Notify the student
+                try:
+                    cursor.execute("""
+                        INSERT INTO user_notifications (enrollment_no, type, title, message, link, created_at)
+                        VALUES (?, 'system', 'Request Expired', ?, '/catalogue', ?)
+                    """, (enrollment_no,
+                          f'Your approved request for "{book_title}" has expired because it was not collected within {_COLLECTION_DEADLINE_HOURS} hours.',
+                          datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                except Exception:
+                    pass
+
+                # 4. Trigger waitlist for the freed book
+                if book_id:
+                    _portal_notify_waitlist(book_id)
+
+                expired_count += 1
+
+            if expired_count > 0:
+                conn.commit()
+                print(f"[Collection Deadline] Expired {expired_count} uncollected book request(s).")
+
+            conn.close()
+        except Exception as e:
+            print(f"[Collection Deadline] Worker error: {e}")
+
+        _time.sleep(1800)  # Run every 30 minutes
+
+threading.Thread(target=_collection_deadline_worker, daemon=True, name='collection_deadline').start()
 
 # --- Helper Functions for Email ---
 
@@ -3709,6 +3811,60 @@ def api_admin_deletion_history():
         }
     })
 
+# FIX 2.1: Admin endpoint to view pending-collection requests with deadline info
+@app.route('/api/admin/pending-collection')
+def api_admin_pending_collection():
+    """List all approved book_requests that are still pending collection, with time remaining."""
+    conn = get_portal_db()
+    cursor = conn.cursor()
+    pk = _requests_pk_column(conn)
+
+    cursor.execute(f"""
+        SELECT {pk}, enrollment_no, details, approved_at
+        FROM requests
+        WHERE status = 'approved'
+          AND request_type = 'book_request'
+          AND approved_at IS NOT NULL
+        ORDER BY approved_at ASC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    now = datetime.now()
+    for row in rows:
+        req_pk = row[pk] if isinstance(row, dict) else row[0]
+        enrollment_no = row['enrollment_no'] if isinstance(row, dict) else row[1]
+        details_raw = row['details'] if isinstance(row, dict) else row[2]
+        approved_at_raw = row['approved_at'] if isinstance(row, dict) else row[3]
+
+        try:
+            details = json.loads(details_raw) if details_raw else {}
+        except Exception:
+            details = {}
+
+        try:
+            approved_dt = datetime.strptime(approved_at_raw, '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            approved_dt = now
+
+        deadline = approved_dt + timedelta(hours=_COLLECTION_DEADLINE_HOURS)
+        remaining = deadline - now
+        hours_left = max(0, remaining.total_seconds() / 3600)
+
+        results.append({
+            'req_id': req_pk,
+            'enrollment_no': enrollment_no,
+            'book_id': details.get('book_id', ''),
+            'book_title': details.get('title', 'Unknown'),
+            'approved_at': approved_at_raw,
+            'deadline': deadline.strftime('%Y-%m-%d %H:%M:%S'),
+            'hours_remaining': round(hours_left, 1),
+            'overdue': hours_left <= 0
+        })
+
+    return jsonify({'status': 'success', 'pending_collection': results, 'deadline_hours': _COLLECTION_DEADLINE_HOURS})
+
 @app.route('/api/admin/requests/<int:req_id>/approve', methods=['GET', 'POST'])
 def api_admin_approve_request(req_id):
     """Approve a general request"""
@@ -3911,8 +4067,9 @@ def api_admin_approve_request(req_id):
         except Exception as e:
             print(f"[book_request approve] Outer error: {e}")
 
-    # Update status to approved
-    cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
+    # Update status to approved (with collection deadline timestamp)
+    _approved_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute(f"UPDATE requests SET status = 'approved', approved_at = ? WHERE {pk} = ?", (_approved_at, req_id))
     
     # NOTIFICATION TRIGGER: Notify student
     # Parse details to get book name
