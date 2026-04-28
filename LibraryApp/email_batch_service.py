@@ -63,21 +63,20 @@ class EmailBatchService:
             if not batch:
                 break
             
-            # FIX v9-M3: Process ALL items in batch, not just max_workers
-            # Previously batch[:self.max_workers] dropped items at index 5-9.
-            threads = []
-            for email_data in batch:
-                thread = threading.Thread(
-                    target=self._send_single_email,
-                    args=(email_data, email_config)
-                )
-                thread.daemon = True
-                thread.start()
-                threads.append(thread)
-            
-            # Wait for batch to complete
-            for thread in threads:
-                thread.join(timeout=30)  # 30 second timeout per thread
+            # FIX v10-M2: Use ThreadPoolExecutor to process ALL items in batch
+            # while respecting the max_workers concurrency cap for SMTP connections.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [
+                    executor.submit(self._send_single_email, email_data, email_config)
+                    for email_data in batch
+                ]
+                # Wait for all futures (30s timeout per item)
+                for future in as_completed(futures, timeout=60):
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
             
             # Update progress
             sent_count += len(batch)

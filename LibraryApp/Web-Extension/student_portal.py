@@ -474,10 +474,10 @@ class RateLimiter:
     
     def _get_client_key(self, endpoint):
         """Generate unique key for client + endpoint"""
-        # FIX v9-H3: Only trust rightmost X-Forwarded-For IP (injected by proxy, not client)
+        # FIX v10-H1: Use leftmost IP (originating client per XFF spec), not rightmost (Render proxy)
         xff = request.headers.get('X-Forwarded-For', '')
         if xff and (os.getenv('RENDER') or os.getenv('IS_SERVER')):
-            client_ip = xff.split(',')[-1].strip()
+            client_ip = xff.split(',')[0].strip()
         else:
             client_ip = request.remote_addr or 'unknown'
         return f"{client_ip}:{endpoint}"
@@ -1526,7 +1526,7 @@ def _collection_deadline_worker():
                             )
                         if cursor_lib.rowcount > 0:
                             cursor_lib.execute(
-                                "UPDATE books SET available_copies = MIN(available_copies + 1, total_copies) WHERE book_id = ?",
+                                "UPDATE books SET available_copies = LEAST(available_copies + 1, total_copies) WHERE book_id = ?",
                                 (book_id,)
                             )
                         conn_lib.commit()
@@ -2149,6 +2149,17 @@ def api_profile_photo():
 
     # FIX v9-M5: Removed dead/unreachable code (notices query leftover from copy-paste)
     return jsonify({'error': 'Method not allowed'}), 405
+
+
+@app.route('/api/notices', methods=['GET'])
+def api_public_notices():
+    """Public notices endpoint for desktop app notice board (no admin auth required)."""
+    conn = get_portal_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, message, created_at FROM notices WHERE active = 1 ORDER BY created_at DESC")
+    notices = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({'notices': notices})
 
 @app.route('/api/loan-history')
 def api_loan_history():
@@ -4115,7 +4126,7 @@ def api_admin_approve_request(req_id):
                             (enrollment_no, book_id, borrow_date, due_date, fine_rate)
                         )
                         cursor_lib.execute(
-                            "UPDATE books SET available_copies = MAX(0, available_copies - 1) WHERE book_id = ?",
+                            "UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE book_id = ?",
                             (book_id,)
                         )
                         conn_lib.commit()
@@ -4145,9 +4156,13 @@ def api_admin_approve_request(req_id):
         except Exception as e:
             print(f"[book_request approve] Outer error: {e}")
 
-    # Update status to approved (with collection deadline timestamp)
+    # Update status to approved
+    # FIX v10-M3: Only set approved_at for book_request (collection deadline tracking)
     _approved_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute(f"UPDATE requests SET status = 'approved', approved_at = ? WHERE {pk} = ?", (_approved_at, req_id))
+    if req['request_type'] == 'book_request':
+        cursor.execute(f"UPDATE requests SET status = 'approved', approved_at = ? WHERE {pk} = ?", (_approved_at, req_id))
+    else:
+        cursor.execute(f"UPDATE requests SET status = 'approved' WHERE {pk} = ?", (req_id,))
     
     # NOTIFICATION TRIGGER: Notify student
     # Parse details to get book name
@@ -4295,12 +4310,12 @@ def api_admin_approve_request(req_id):
                         accrued_fine = overdue_days * fine_per_day
                         if renewal_accession:
                             cursor_lib.execute(
-                                "UPDATE borrow_records SET fine = MAX(COALESCE(fine, 0), ?) WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
+                                "UPDATE borrow_records SET fine = GREATEST(COALESCE(fine, 0), ?) WHERE accession_no = ? AND enrollment_no = ? AND return_date IS NULL",
                                 (accrued_fine, renewal_accession, req['enrollment_no'])
                             )
                         else:
                             cursor_lib.execute(
-                                "UPDATE borrow_records SET fine = MAX(COALESCE(fine, 0), ?) WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
+                                "UPDATE borrow_records SET fine = GREATEST(COALESCE(fine, 0), ?) WHERE book_id = ? AND enrollment_no = ? AND return_date IS NULL",
                                 (accrued_fine, renewal_book_id, req['enrollment_no'])
                             )
                     
