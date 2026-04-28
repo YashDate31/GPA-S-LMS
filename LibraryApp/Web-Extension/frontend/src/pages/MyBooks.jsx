@@ -27,7 +27,7 @@ const getCoverStyle = (title, isOverdue) => {
 // BUG 5 FIX: Accept the 'user' prop that App.jsx passes — was silently discarded before
 export default function MyBooks({ user }) {
   const navigate = useNavigate();
-  const [data, setData] = useState({ borrows: [], history: [] });
+  const [data, setData] = useState({ borrows: [], history: [], maxRenewals: 3 });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('current'); // current, returned, all
   const [renewingBookId, setRenewingBookId] = useState(null);
@@ -45,7 +45,11 @@ export default function MyBooks({ user }) {
         axios.get('/api/dashboard'),
         axios.get('/api/requests')
       ]);
-      setData({ borrows: dashRes.data.borrows || [], history: dashRes.data.history || [] });
+      setData({
+        borrows: dashRes.data.borrows || [],
+        history: dashRes.data.history || [],
+        maxRenewals: dashRes.data.summary?.max_renewals || 3
+      });
       // Track which books have pending renewal requests
       const pending = (reqRes.data.requests || [])
         .filter(r => r.request_type === 'renewal' && r.status === 'pending')
@@ -279,6 +283,18 @@ export default function MyBooks({ user }) {
                                         </div>
                                     )}
 
+                                    {/* Renewal Info Badge */}
+                                    {book.status !== 'returned' && book.renewal_count != null && (
+                                        <div className={`flex items-center gap-2 text-xs font-bold px-3 py-1.5 rounded-lg border ${
+                                            book.renewal_count >= data.maxRenewals
+                                                ? 'text-slate-500 bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                                                : 'text-blue-600 bg-blue-50 dark:bg-blue-900/20 border-blue-100 dark:border-blue-900/30'
+                                        }`}>
+                                            <RefreshCw size={12} />
+                                            <span>Renewals: {book.renewal_count}/{data.maxRenewals} used</span>
+                                        </div>
+                                    )}
+
                                     {/* Renewal Button - only for active/overdue loans (not returned) */}
                                     {book.status !== 'returned' && book.book_id && (
                                         <div className="mt-1">
@@ -295,7 +311,7 @@ export default function MyBooks({ user }) {
                                             ) : (
                                                 <button
                                                     onClick={() => handleRenew(book)}
-                                                    disabled={renewingBookId === (book.accession_no || book.book_id)}
+                                                    disabled={renewingBookId === (book.accession_no || book.book_id) || book.renewal_count >= data.maxRenewals}
                                                     className="w-full flex items-center justify-center gap-2 text-xs font-bold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800 transition-all disabled:opacity-50 cursor-pointer"
                                                 >
                                                     {renewingBookId === (book.accession_no || book.book_id) ? (

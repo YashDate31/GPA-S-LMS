@@ -6083,6 +6083,124 @@ Current Settings:
         self.borrowed_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         borrowed_v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         borrowed_h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # --- Right-click context menu for borrowed books ---
+        self.borrowed_context_menu = tk.Menu(self.root, tearoff=0, font=('Segoe UI', 10))
+        self.borrowed_context_menu.add_command(
+            label="📕 Mark as Lost",
+            command=lambda: self._mark_book_lost_or_damaged('lost')
+        )
+        self.borrowed_context_menu.add_command(
+            label="🔨 Mark as Damaged",
+            command=lambda: self._mark_book_lost_or_damaged('damaged')
+        )
+        self.borrowed_tree.bind('<Button-3>', self._show_borrowed_context_menu)
+    
+    def _show_borrowed_context_menu(self, event):
+        """Show context menu on right-click in borrowed tree."""
+        item = self.borrowed_tree.identify_row(event.y)
+        if item:
+            self.borrowed_tree.selection_set(item)
+            self.borrowed_context_menu.post(event.x_root, event.y_root)
+
+    def _mark_book_lost_or_damaged(self, status):
+        """Mark the selected borrowed book as lost or damaged via database.py."""
+        selection = self.borrowed_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please right-click on a borrowed book first.")
+            return
+
+        values = self.borrowed_tree.item(selection[0], 'values')
+        # Columns: ('Student', 'Branch', 'Book ID', 'Book Title', 'Issue Date', 'Due Date', 'Days Left')
+        student_name = values[0]
+        book_id = values[2]
+        book_title = values[3]
+
+        # We need the enrollment number. It's not directly in the tree, so look it up.
+        enrollment_no = None
+        try:
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            # Match by student name + active borrow of this book
+            cur.execute(
+                "SELECT br.enrollment_no FROM borrow_records br "
+                "JOIN students s ON br.enrollment_no = s.enrollment_no "
+                "WHERE s.name = ? AND (br.book_id = ? OR br.accession_no = ?) AND br.status = 'borrowed' "
+                "LIMIT 1",
+                (student_name, book_id, book_id)
+            )
+            row = cur.fetchone()
+            if row:
+                enrollment_no = row[0]
+            conn.close()
+        except Exception as e:
+            print(f"[Mark Lost] Enrollment lookup failed: {e}")
+
+        if not enrollment_no:
+            messagebox.showerror("Error", f"Could not identify student enrollment for '{student_name}'.")
+            return
+
+        import os
+        replacement_fine = int(os.getenv('LOST_BOOK_FINE', 500))
+        confirm = messagebox.askyesno(
+            f"Mark as {status.title()}",
+            f"Are you sure you want to mark this book as {status}?\n\n"
+            f"Student: {student_name}\n"
+            f"Book: {book_title} (ID: {book_id})\n\n"
+            f"This will:\n"
+            f"• Set the borrow status to '{status}'\n"
+            f"• Apply a replacement fine of ₹{replacement_fine}\n"
+            f"• Permanently reduce total copies by 1\n\n"
+            f"This action cannot be undone."
+        )
+        if not confirm:
+            return
+
+        success, message = self.db.mark_book_lost_or_damaged(enrollment_no, book_id, status)
+        if success:
+            self._log_admin_activity(
+                f"Book {status.title()}",
+                f"Marked book {book_id} ({book_title}) as {status} for student {enrollment_no}"
+            )
+            messagebox.showinfo("Success", message)
+
+            # Ask about fine collection
+            collected = messagebox.askyesno(
+                "Fine Collection",
+                f"Was the replacement fine of ₹{replacement_fine} collected from the student?\n\n"
+                f"If yes, the fine will be marked as paid."
+            )
+            if collected:
+                try:
+                    _admin_api_request(
+                        f"http://127.0.0.1:{self.portal_port}/api/admin/mark-fine-paid",
+                        data={"enrollment_no": enrollment_no, "book_id": book_id},
+                        method='POST',
+                        timeout=5
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn = self.db.get_connection()
+                    cur = conn.cursor()
+                    from datetime import datetime as _dt_mark
+                    paid_at = _dt_mark.now().strftime('%Y-%m-%d %H:%M:%S')
+                    cur.execute(
+                        "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? "
+                        "WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                        (paid_at, enrollment_no, book_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as local_err:
+                    print(f"[Mark Lost Fine] Local DB update failed: {local_err}")
+
+            self.refresh_borrowed()
+            self.refresh_books()
+            self.refresh_dashboard()
+            self.refresh_records()
+        else:
+            messagebox.showerror("Error", message)
     
     # Commented out - no longer needed since we removed combobox autocomplete
     # def filter_student_suggestions(self, event, mode):
@@ -12690,6 +12808,123 @@ Note: This is an automated email. Please find the attached formal overdue letter
         materials_tab = tk.Frame(portal_notebook, bg='white')
         portal_notebook.add(materials_tab, text="📚 Study Materials")
         self._create_study_materials_section(materials_tab)
+
+        # Sub-tab 8: Pending Collection
+        collection_tab = tk.Frame(portal_notebook, bg='white')
+        portal_notebook.add(collection_tab, text="📦 Pending Collection")
+        self._create_pending_collection_section(collection_tab)
+
+    def _create_pending_collection_section(self, parent):
+        """Display approved book requests awaiting student collection."""
+        # Header
+        tk.Label(
+            parent,
+            text="📦 Pending Book Collection",
+            font=('Segoe UI', 18, 'bold'),
+            bg='white',
+            fg=self.colors['accent']
+        ).pack(pady=(20, 5), padx=20, anchor='w')
+
+        tk.Label(
+            parent,
+            text="Approved book requests that students haven't collected yet. "
+                 "Expired entries are auto-cancelled by the server.",
+            font=('Segoe UI', 10),
+            bg='white',
+            fg='#666'
+        ).pack(padx=20, anchor='w', pady=(0, 10))
+
+        # Refresh button
+        btn_frame = tk.Frame(parent, bg='white')
+        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        tk.Button(
+            btn_frame,
+            text="🔄 Refresh",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['secondary'], fg='white', relief='flat',
+            padx=12, pady=4, cursor='hand2',
+            command=self._refresh_pending_collection
+        ).pack(side=tk.LEFT)
+
+        # Treeview for pending collection list
+        tree_frame = tk.Frame(parent, bg='white')
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+
+        columns = ('Enrollment', 'Book ID', 'Book Title', 'Approved At', 'Deadline', 'Hours Left', 'Status')
+        self.pending_collection_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+        col_widths = {'Enrollment': 120, 'Book ID': 80, 'Book Title': 200,
+                      'Approved At': 140, 'Deadline': 140, 'Hours Left': 80, 'Status': 80}
+        for col in columns:
+            self.pending_collection_tree.heading(col, text=col)
+            self.pending_collection_tree.column(col, width=col_widths.get(col, 100))
+
+        self.pending_collection_tree.tag_configure('overdue', foreground='#b30000')
+        self.pending_collection_tree.tag_configure('urgent', foreground='#856404')
+        self.pending_collection_tree.tag_configure('ok', foreground='#155724')
+
+        v_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.pending_collection_tree.yview)
+        self.pending_collection_tree.configure(yscrollcommand=v_scroll.set)
+        self.pending_collection_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Status label
+        self.pending_collection_status = tk.Label(
+            parent, text="Click 'Refresh' to load pending collections.",
+            font=('Segoe UI', 9), bg='white', fg='#999'
+        )
+        self.pending_collection_status.pack(pady=(0, 10))
+
+    def _refresh_pending_collection(self):
+        """Fetch pending collection data from the portal API."""
+        try:
+            url = f"http://127.0.0.1:{self.portal_port}/api/admin/pending-collection"
+            data = _admin_api_request(url, timeout=10)
+
+            if not data or data.get('status') != 'success':
+                self.pending_collection_status.config(
+                    text="Failed to fetch pending collection data.", fg='#c00'
+                )
+                return
+
+            pending = data.get('pending_collection', [])
+
+            # Clear tree
+            for item in self.pending_collection_tree.get_children():
+                self.pending_collection_tree.delete(item)
+
+            for entry in pending:
+                hours_left = entry.get('hours_remaining', 0)
+                is_overdue = entry.get('overdue', False)
+
+                if is_overdue:
+                    status_text = '❌ Expired'
+                    tag = 'overdue'
+                elif hours_left <= 6:
+                    status_text = '⚠️ Urgent'
+                    tag = 'urgent'
+                else:
+                    status_text = '✅ Active'
+                    tag = 'ok'
+
+                self.pending_collection_tree.insert('', 'end', values=(
+                    entry.get('enrollment_no', ''),
+                    entry.get('book_id', ''),
+                    entry.get('book_title', ''),
+                    entry.get('approved_at', ''),
+                    entry.get('deadline', ''),
+                    f"{hours_left:.1f}h",
+                    status_text
+                ), tags=(tag,))
+
+            self.pending_collection_status.config(
+                text=f"Loaded {len(pending)} pending collection(s). "
+                     f"Deadline: {data.get('deadline_hours', 48)}h after approval.",
+                fg='#333'
+            )
+        except Exception as e:
+            self.pending_collection_status.config(
+                text=f"Error: {str(e)}", fg='#c00'
+            )
 
     def _create_broadcast_section(self, parent):
         """Create broadcast notice management section"""

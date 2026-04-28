@@ -110,12 +110,14 @@ def _normalize_database_url(db_url: str) -> str:
             ref = _extract_supabase_project_ref()
             if ref:
                 direct_host = f"db.{ref}.supabase.co"
-                userinfo = ''
-                if parsed.username:
-                    userinfo = parsed.username
-                    if parsed.password is not None:
-                        userinfo += f":{parsed.password}"
-                    userinfo += '@'
+                # Pooler uses 'postgres.<project_ref>' but direct needs 'postgres'
+                username = parsed.username or 'postgres'
+                if '.' in username:
+                    username = username.split('.')[0]
+                userinfo = username
+                if parsed.password is not None:
+                    userinfo += f":{parsed.password}"
+                userinfo += '@'
                 new_netloc = f"{userinfo}{direct_host}:5432"
                 rewritten = urlunparse(parsed._replace(netloc=new_netloc))
                 rewritten = _ensure_sslmode_require(rewritten)
@@ -1561,7 +1563,65 @@ def _collection_deadline_worker():
 
         _time.sleep(1800)  # Run every 30 minutes
 
+
+def _waitlist_expiry_worker():
+    """Background thread: clean up stale waitlist entries where the student was notified
+    but didn't act within 72 hours. Resets `notified` to 0 so the next person gets a chance."""
+    import time as _time
+    _time.sleep(300)  # Initial delay: let the app boot
+    _WAITLIST_NOTIFY_EXPIRY_HOURS = int(os.environ.get('WAITLIST_NOTIFY_EXPIRY_HOURS', 72))
+
+    while True:
+        try:
+            conn = get_portal_db()
+            cursor = conn.cursor()
+
+            # Find entries notified more than X hours ago that are still on the waitlist
+            cutoff = (datetime.now() - timedelta(hours=_WAITLIST_NOTIFY_EXPIRY_HOURS)).strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute("""
+                SELECT id, enrollment_no, book_id, book_title
+                FROM book_waitlist
+                WHERE notified = 1 AND notified_at IS NOT NULL AND notified_at < ?
+            """, (cutoff,))
+            stale_entries = cursor.fetchall()
+
+            for entry in stale_entries:
+                entry_id = entry['id'] if isinstance(entry, dict) else entry[0]
+                enrollment_no = entry['enrollment_no'] if isinstance(entry, dict) else entry[1]
+                book_id = entry['book_id'] if isinstance(entry, dict) else entry[2]
+                book_title = entry['book_title'] if isinstance(entry, dict) else entry[3]
+
+                # Remove the stale entry so the next person can be notified
+                cursor.execute("DELETE FROM book_waitlist WHERE id = ?", (entry_id,))
+
+                # Notify the student that their waitlist slot expired
+                try:
+                    cursor.execute("""
+                        INSERT INTO user_notifications (enrollment_no, type, title, message, link, created_at)
+                        VALUES (?, 'system', 'Waitlist Slot Expired',
+                                ?, '/catalogue', CURRENT_TIMESTAMP)
+                    """, (
+                        enrollment_no,
+                        f'Your waitlist notification for "{book_title}" has expired because you did not collect the book within {_WAITLIST_NOTIFY_EXPIRY_HOURS} hours. You may rejoin the waitlist.'
+                    ))
+                except Exception:
+                    pass
+
+                # Re-trigger notification for the next person in line
+                _portal_notify_waitlist(book_id)
+
+            if stale_entries:
+                conn.commit()
+                print(f"[Waitlist Expiry] Cleaned up {len(stale_entries)} stale waitlist notification(s).")
+
+            conn.close()
+        except Exception as e:
+            print(f"[Waitlist Expiry] Worker error: {e}")
+
+        _time.sleep(3600)  # Run every hour
+
 threading.Thread(target=_collection_deadline_worker, daemon=True, name='collection_deadline').start()
+threading.Thread(target=_waitlist_expiry_worker, daemon=True, name='waitlist_expiry').start()
 
 # --- Helper Functions for Email ---
 
@@ -2648,7 +2708,7 @@ def api_dashboard():
     
     # Active Loans
     cursor.execute("""
-        SELECT b.title, b.author, b.cover_url, br.borrow_date, br.due_date, br.book_id, br.accession_no, COALESCE(br.fine, 0) as fine
+        SELECT b.title, b.author, b.cover_url, br.borrow_date, br.due_date, br.book_id, br.accession_no, COALESCE(br.fine, 0) as fine, COALESCE(br.renewal_count, 0) as renewal_count
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ? AND br.status = 'borrowed'
@@ -2860,6 +2920,7 @@ def api_dashboard():
             'wishlist_count': wishlist_count,
             'active_fine': int(active_fine),
             'total_fine_ever': total_fine_ever,
+            'max_renewals': int(os.environ.get('MAX_RENEWALS_PER_BOOK', 3)),
         }
     })
 
@@ -4721,6 +4782,7 @@ def api_admin_mark_fine_paid():
     enrollment_no = data.get('enrollment_no')
     book_id = data.get('book_id')
     record_id = data.get('record_id')  # Optional: target specific borrow record
+    waive = data.get('waive', False)  # If true, also sets fine_waived=1
 
     if not enrollment_no and not record_id:
         return jsonify({'status': 'error', 'message': 'enrollment_no or record_id required'}), 400
@@ -4728,22 +4790,23 @@ def api_admin_mark_fine_paid():
     conn = get_library_db()
     cursor = conn.cursor()
     paid_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    waive_col = ", fine_waived = 1" if waive else ""
 
     try:
         if record_id:
             cursor.execute(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE id = ? AND fine > 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE id = ? AND fine > 0",
                 (paid_at, record_id)
             )
         elif book_id:
             cursor.execute(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
                 (paid_at, enrollment_no, book_id)
             )
         else:
             # Mark ALL unpaid fines for this student as paid
             cursor.execute(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
                 (paid_at, enrollment_no)
             )
 
@@ -4753,17 +4816,17 @@ def api_admin_mark_fine_paid():
         # Push to cloud
         if record_id:
             _push_to_cloud(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE id = ? AND fine > 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE id = ? AND fine > 0",
                 (paid_at, record_id)
             )
         elif book_id:
             _push_to_cloud(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
                 (paid_at, enrollment_no, book_id)
             )
         else:
             _push_to_cloud(
-                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                f"UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ?{waive_col} WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
                 (paid_at, enrollment_no)
             )
     except Exception as e:
