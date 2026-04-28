@@ -2173,7 +2173,7 @@ def api_loan_history():
     
     # Get ALL borrow records (borrowed, returned, overdue)
     cursor.execute("""
-        SELECT b.title, b.author, b.category, b.cover_url, br.borrow_date, br.due_date, br.return_date, br.status, br.fine
+        SELECT b.title, b.author, b.category, b.cover_url, br.borrow_date, br.due_date, br.return_date, br.status, br.fine, COALESCE(br.fine_paid, 0) as fine_paid, br.fine_paid_at
         FROM borrow_records br
         JOIN books b ON br.book_id = b.book_id
         WHERE br.enrollment_no = ?
@@ -2224,7 +2224,7 @@ def api_loan_history():
                     return_dt = datetime(_ret_d2.year, _ret_d2.month, _ret_d2.day)
                     if return_dt > due_dt:
                         record['actual_status'] = 'Returned Late'
-                        record['fine_paid'] = record.get('fine', 0) > 0
+                        record['fine_paid'] = bool(record.get('fine_paid', 0))
                         returned_late.append(record)
                     else:
                         record['actual_status'] = 'Returned On Time'
@@ -4713,6 +4713,74 @@ def api_admin_reset_password(enrollment_no):
         'status': 'success', 
         'message': f'Password reset to enrollment number. Student will be prompted to change on next login.'
     })
+
+@app.route('/api/admin/mark-fine-paid', methods=['POST'])
+def api_admin_mark_fine_paid():
+    """Mark a borrow record's fine as paid by the librarian."""
+    data = request.get_json(force=True, silent=True) or {}
+    enrollment_no = data.get('enrollment_no')
+    book_id = data.get('book_id')
+    record_id = data.get('record_id')  # Optional: target specific borrow record
+
+    if not enrollment_no and not record_id:
+        return jsonify({'status': 'error', 'message': 'enrollment_no or record_id required'}), 400
+
+    conn = get_library_db()
+    cursor = conn.cursor()
+    paid_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        if record_id:
+            cursor.execute(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE id = ? AND fine > 0",
+                (paid_at, record_id)
+            )
+        elif book_id:
+            cursor.execute(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                (paid_at, enrollment_no, book_id)
+            )
+        else:
+            # Mark ALL unpaid fines for this student as paid
+            cursor.execute(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                (paid_at, enrollment_no)
+            )
+
+        updated = cursor.rowcount
+        conn.commit()
+
+        # Push to cloud
+        if record_id:
+            _push_to_cloud(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE id = ? AND fine > 0",
+                (paid_at, record_id)
+            )
+        elif book_id:
+            _push_to_cloud(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                (paid_at, enrollment_no, book_id)
+            )
+        else:
+            _push_to_cloud(
+                "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? WHERE enrollment_no = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                (paid_at, enrollment_no)
+            )
+    except Exception as e:
+        conn.close()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+    conn.close()
+
+    if updated == 0:
+        return jsonify({'status': 'warning', 'message': 'No unpaid fines found to mark'}), 404
+
+    return jsonify({
+        'status': 'success',
+        'message': f'{updated} fine record(s) marked as paid',
+        'records_updated': updated
+    })
+
 
 @app.route('/api/admin/bulk-password-reset', methods=['POST'])
 def api_admin_bulk_password_reset():

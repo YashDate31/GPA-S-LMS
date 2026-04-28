@@ -35,8 +35,21 @@ class PostgresRow:
             return self._values[item]
         return self._data[item]
     
+    def __contains__(self, item):
+        return item in self._data
+
+    def get(self, key, default=None):
+        """Dict-like .get() for compatibility with code that treats rows as dicts."""
+        return self._data.get(key, default)
+
     def keys(self):
         return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def items(self):
+        return self._data.items()
     
     def __iter__(self):
         # sqlite3.Row iterates over values
