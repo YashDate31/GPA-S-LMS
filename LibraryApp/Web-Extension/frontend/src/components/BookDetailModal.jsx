@@ -12,6 +12,7 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
   const [isWishlisted, setIsWishlisted] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
+  const [waitlistInfo, setWaitlistInfo] = useState(null); // { position, total_waiting }
   const [userRating, setUserRating] = useState(0);
   const [ratingStats, setRatingStats] = useState({ avg: 0, count: 0 });
   const [hoverRating, setHoverRating] = useState(0);
@@ -41,11 +42,28 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
         setUserRating(data.user_rating || 0);
         setIsWishlisted(data.isWishlisted || false);
       }
+      // Fetch waitlist position if student is on the waitlist
+      if (data.on_waitlist) {
+        fetchWaitlistPosition(safeId);
+      } else {
+        setWaitlistInfo(null);
+      }
     } catch (err) {
       console.error("Error fetching book details:", err);
       setError("Failed to load book details. Please try again.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchWaitlistPosition = async (id) => {
+    try {
+      const { data } = await axios.get(`/api/books/${id}/waitlist-position`);
+      if (data.on_waitlist) {
+        setWaitlistInfo({ position: data.position, total: data.total_waiting });
+      }
+    } catch {
+      // Silently fail — position is informational
     }
   };
 
@@ -130,11 +148,13 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
         await axios.delete(`/api/books/${bookId}/notify`);
         addToast('Removed from waitlist', 'info');
         setBook({ ...book, on_waitlist: false });
+        setWaitlistInfo(null);
       } else {
         // Add to waitlist
         await axios.post(`/api/books/${bookId}/notify`);
         addToast('You will be notified when this book is available', 'success');
         setBook({ ...book, on_waitlist: true });
+        fetchWaitlistPosition(bookId);
       }
     } catch (err) {
       console.error("Notify error:", err);
@@ -451,6 +471,11 @@ export default function BookDetailModal({ isOpen, onClose, bookId }) {
                               </>
                             )}
                           </button>
+                        )}
+                        {waitlistInfo && book.on_waitlist && (
+                          <span className="text-xs text-slate-500 flex items-center gap-1 self-center">
+                            You are <strong className="text-brand-blue">#{waitlistInfo.position}</strong> of {waitlistInfo.total} in queue
+                          </span>
                         )}
                       </div>
                     )}

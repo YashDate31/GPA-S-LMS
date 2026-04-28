@@ -7997,6 +7997,38 @@ Current Settings:
                     "Late Return",
                     f"This book is returned {days_late} day(s) late.\nFine: ₹{fine_amount}"
                 )
+                # Ask librarian if fine was collected right now
+                collected = messagebox.askyesno(
+                    "Fine Collection",
+                    f"Was the fine of ₹{fine_amount} collected from the student?\n\n"
+                    f"If yes, the fine will be marked as paid.\n"
+                    f"If no, the student will need to clear the fine before borrowing again."
+                )
+                if collected:
+                    try:
+                        _admin_api_request(
+                            f"http://127.0.0.1:{self.portal_port}/api/admin/mark-fine-paid",
+                            data={"enrollment_no": enrollment_no, "book_id": book_id},
+                            method='POST',
+                            timeout=5
+                        )
+                    except Exception as fp_err:
+                        print(f"[Fine Paid] Portal API call failed: {fp_err}")
+                    # Also mark locally in case portal is down
+                    try:
+                        conn = self.db.get_connection()
+                        cur = conn.cursor()
+                        from datetime import datetime as _dt_fp
+                        paid_at = _dt_fp.now().strftime('%Y-%m-%d %H:%M:%S')
+                        cur.execute(
+                            "UPDATE borrow_records SET fine_paid = 1, fine_paid_at = ? "
+                            "WHERE enrollment_no = ? AND book_id = ? AND fine > 0 AND COALESCE(fine_paid, 0) = 0",
+                            (paid_at, enrollment_no, book_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                    except Exception as local_err:
+                        print(f"[Fine Paid] Local DB update failed: {local_err}")
 
             # Clear fields
             self.return_enrollment_entry.delete(0, tk.END)

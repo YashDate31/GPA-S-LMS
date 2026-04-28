@@ -807,10 +807,16 @@ class SyncManager:
                     synced_count += 1
 
                 except Exception as e:
+                    err_str = str(e).lower()
                     try:
                         remote_conn.rollback()
                     except Exception:
                         pass
+                    # If the connection itself is dead, stop iterating — no point
+                    # printing the same error for every remaining row.
+                    if 'cursor already closed' in err_str or 'connection' in err_str and 'closed' in err_str:
+                        print(f"[Sync] Connection lost while syncing {table_name} (local→remote): {e}")
+                        break
                     print(f"Error syncing row in {table_name} (local→remote): {e}")
 
             remote_conn.commit()
@@ -994,6 +1000,10 @@ class SyncManager:
                         synced_count += 1
 
                 except Exception as e:
+                    err_str = str(e).lower()
+                    if 'cursor already closed' in err_str or 'connection' in err_str and 'closed' in err_str:
+                        print(f"[Sync] Connection lost while syncing {table_name} (remote→local): {e}")
+                        break
                     print(f"Error syncing row from remote in {table_name}: {e}")
 
             local_conn.commit()
