@@ -94,12 +94,15 @@ def _normalize_database_url(db_url: str) -> str:
             project_ref = _extract_supabase_project_ref()
             if project_ref:
                 direct_host = f"db.{project_ref}.supabase.co"
-                userinfo = ''
-                if parsed.username:
-                    userinfo = parsed.username
-                    if parsed.password is not None:
-                        userinfo += f":{parsed.password}"
-                    userinfo += '@'
+                # Pooler uses 'postgres.<project_ref>' as username, but the
+                # direct host requires just 'postgres'.
+                username = parsed.username or 'postgres'
+                if '.' in username:
+                    username = username.split('.')[0]  # 'postgres.xxx' → 'postgres'
+                userinfo = username
+                if parsed.password is not None:
+                    userinfo += f":{parsed.password}"
+                userinfo += '@'
                 new_netloc = f"{userinfo}{direct_host}:5432"
                 rewritten = urlunparse(parsed._replace(netloc=new_netloc))
                 rewritten = _ensure_sslmode_require(rewritten)
