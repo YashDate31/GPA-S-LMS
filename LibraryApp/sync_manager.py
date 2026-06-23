@@ -165,7 +165,7 @@ class SyncManager:
     
     def _save_sync_time(self, status='completed'):
         """Save current sync timestamp"""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         try:
             last_successful = self.last_sync_time
             if os.path.exists(self.sync_log_path):
@@ -397,7 +397,7 @@ class SyncManager:
             # Library tables (bidirectional sync)
             default_tables_to_sync = ['students', 'books', 'borrow_records', 'admin_activity', 'academic_years', 'promotion_history', 'system_settings']
             default_portal_tables_pull = ['requests', 'deletion_requests', 'student_auth', 'book_wishlist', 'book_ratings']
-            default_portal_tables_push = ['notices', 'student_auth', 'book_wishlist', 'book_ratings']
+            default_portal_tables_push = ['notices', 'student_auth', 'book_wishlist', 'book_ratings', 'requests', 'deletion_requests']
 
             if tables_override:
                 requested = set(tables_override)
@@ -1262,6 +1262,10 @@ class SyncManager:
                 unique_key_cols = ['book_id', 'enrollment_no']
             elif table_name == 'book_ratings':
                 unique_key_cols = ['book_id', 'enrollment_no']
+            elif table_name == 'requests':
+                unique_key_cols = ['enrollment_no', 'request_type', 'created_at']
+            elif table_name == 'deletion_requests':
+                unique_key_cols = ['student_id', 'timestamp']
             else:
                 unique_key_cols = ['created_at']
             
@@ -1289,7 +1293,7 @@ class SyncManager:
                     
                     if exists:
                         # For student_auth, update existing records (password may have changed)
-                        if table_name == 'student_auth' or table_name == 'book_ratings':
+                        if table_name in ('student_auth', 'book_ratings', 'requests', 'deletion_requests'):
                             update_cols = []
                             update_vals = []
                             for lc in local_columns:
