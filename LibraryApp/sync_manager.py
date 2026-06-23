@@ -90,24 +90,7 @@ def _normalize_database_url(db_url: str) -> str:
         except Exception:
             pass
 
-        if host.endswith('pooler.supabase.com'):
-            project_ref = _extract_supabase_project_ref()
-            if project_ref:
-                direct_host = f"db.{project_ref}.supabase.co"
-                # Pooler uses 'postgres.<project_ref>' as username, but the
-                # direct host requires just 'postgres'.
-                username = parsed.username or 'postgres'
-                if '.' in username:
-                    username = username.split('.')[0]  # 'postgres.xxx' → 'postgres'
-                userinfo = username
-                if parsed.password is not None:
-                    userinfo += f":{parsed.password}"
-                userinfo += '@'
-                new_netloc = f"{userinfo}{direct_host}:5432"
-                rewritten = urlunparse(parsed._replace(netloc=new_netloc))
-                rewritten = _ensure_sslmode_require(rewritten)
-                print(f"[Sync] Replaced unresolved Supabase pooler host '{host}' with '{direct_host}'")
-                return rewritten
+        # Disabled pooler rewriting because Supabase has disabled IPv4 for db.* hosts.
     except Exception:
         pass
 
