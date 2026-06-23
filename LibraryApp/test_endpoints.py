@@ -17,9 +17,9 @@ try:
     import student_portal
     get_portal_db = student_portal.get_portal_db
     get_library_db = student_portal.get_library_db
-    print("✓ Successfully imported student_portal")
+    print("OK Successfully imported student_portal")
 except Exception as e:
-    print(f"✗ Import error: {e}")
+    print(f"FAIL Import error: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)

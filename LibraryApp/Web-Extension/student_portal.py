@@ -1450,7 +1450,10 @@ def init_portal_db():
     conn.close()
 
 # Initialize on Import
-init_portal_db()
+try:
+    init_portal_db()
+except Exception as e:
+    print(f"[STARTUP ERROR] Database initialization failed. The server will start, but database-dependent routes will fail. Error: {e}")
 
 # Run cleanup on startup (after all functions are defined)
 threading.Thread(target=cleanup_logs, daemon=True).start()
