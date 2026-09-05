@@ -443,6 +443,16 @@ def api_version():
     return jsonify(info)
 
 
+@app.get('/api/health')
+def api_health():
+    """Health check endpoint to keep the server awake."""
+    return jsonify({
+        'status': 'success',
+        'message': 'Server is healthy and awake',
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    })
+
+
 # --- Rate Limiter (Custom Implementation - No External Dependencies) ---
 class RateLimiter:
     """In-memory sliding window rate limiter"""

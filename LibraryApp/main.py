@@ -11409,9 +11409,9 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 if nums_sorted == list(range(nums_sorted[0], nums_sorted[0] + len(nums_sorted))):
                     range_str = f"{nums_sorted[0]}-{nums_sorted[-1]}"
                 else:
-                    range_str = ', '.join(str(n) for n in nums_sorted)
+                    range_str = ','.join(str(n) for n in nums_sorted)
             except Exception:
-                range_str = ', '.join(acc_list)
+                range_str = ','.join(acc_list)
             return acc_list[0], range_str, csv_str
 
         def parse_gpa_sheet(df, sheet_name):
@@ -18525,7 +18525,6 @@ Note: This is an automated email. Please find the attached formal overdue letter
                  font=('Segoe UI', 10, 'italic'), bg='white', fg='#999').pack(side=tk.BOTTOM, pady=20)
 
 
-# Main application entry point
 if __name__ == "__main__":
     root = tk.Tk()
     app = LibraryApp(root)
