@@ -333,12 +333,20 @@ class SyncManager:
                     added_any = True
                 except Exception as e:
                     print(f"[Schema Sync] Could not add {table_name}.{col_name}: {e}")
+                    try:
+                        remote_conn.rollback()
+                    except Exception:
+                        pass
 
             if added_any:
                 remote_conn.commit()
             self._schema_cache.add(table_name)  # Cache: skip this table next sync cycle
         except Exception as e:
             print(f"[Schema Sync] Failed for {table_name}: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
     
     def sync_now(self, direction='both', progress_callback=None, tables_override=None):
         """
@@ -611,6 +619,10 @@ class SyncManager:
                 rc.execute(f"DELETE FROM {table_name} WHERE {pk_col} = %s", (pk_value,))
             except Exception as e:
                 # If table doesn't exist remotely or constraints block, keep tombstone anyway.
+                try:
+                    remote_conn.rollback()
+                except Exception:
+                    pass
                 print(f"[Sync Deletions] Remote delete failed for {table_name}({pk_value}): {e}")
 
             # 3) Mark local tombstone as synced
@@ -723,6 +735,16 @@ class SyncManager:
             if not rows:
                 return 0
 
+            # Check if table exists remotely
+            remote_cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = %s
+                )
+            """, (table_name,))
+            if not remote_cursor.fetchone()[0]:
+                return 0
+
             # All column names from local
             all_columns = [desc[0] for desc in local_cursor.description]
 
@@ -810,6 +832,10 @@ class SyncManager:
 
         except Exception as e:
             print(f"Error syncing table {table_name} local to remote: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
             return 0
     
     def _sync_table_remote_to_local(self, local_conn, remote_conn, table_name):
@@ -838,6 +864,16 @@ class SyncManager:
                     )
                 """)
                 local_conn.commit()
+
+            # Check if table exists remotely
+            remote_cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = %s
+                )
+            """, (table_name,))
+            if not remote_cursor.fetchone()[0]:
+                return 0
 
             # Delta sync from remote
             try:
@@ -997,6 +1033,10 @@ class SyncManager:
 
         except Exception as e:
             print(f"Error syncing table {table_name} remote to local: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
             return 0
     
     # Natural business-key map — used by both local→remote and remote→local sync.
@@ -1100,10 +1140,13 @@ class SyncManager:
                     row_dict = dict(zip(remote_columns, row))
                     
                     # Build unique key values for deduplication check
-                    unique_vals = [row_dict.get(c) for c in unique_key_cols]
-                    if any(v is None for v in unique_vals):
+                    raw_unique_vals = [row_dict.get(c) for c in unique_key_cols]
+                    if any(v is None for v in raw_unique_vals):
                         continue  # Skip rows with null unique keys
                     
+                    # Convert datetimes to strings for consistent SQLite matching
+                    unique_vals = [str(v) if isinstance(v, datetime) else v for v in raw_unique_vals]
+
                     # Check if record already exists locally using unique key
                     where_clause = ' AND '.join([f"{c} = ?" for c in unique_key_cols])
                     check_query = f"SELECT 1 FROM {table_name} WHERE {where_clause} LIMIT 1"
@@ -1111,14 +1154,17 @@ class SyncManager:
                     exists = local_cursor.fetchone()
                     
                     if exists:
-                        # For student_auth, update existing records (password may have changed)
-                        if table_name == 'student_auth' or table_name == 'book_ratings':
+                        # Update existing records if fields changed
+                        if table_name in ('student_auth', 'book_ratings', 'requests', 'deletion_requests'):
                             update_cols = []
                             update_vals = []
                             for rc in remote_columns:
                                 if rc in column_map and rc not in unique_key_cols:
                                     update_cols.append(f"{column_map[rc]} = ?")
-                                    update_vals.append(row_dict[rc])
+                                    val = row_dict[rc]
+                                    if isinstance(val, datetime):
+                                        val = str(val)
+                                    update_vals.append(val)
                             if update_cols:
                                 update_vals.extend(unique_vals)
                                 update_query = f"UPDATE {table_name} SET {', '.join(update_cols)} WHERE {where_clause}"
@@ -1132,7 +1178,10 @@ class SyncManager:
                     for rc in remote_columns:
                         if rc in column_map:
                             insert_cols.append(column_map[rc])
-                            insert_vals.append(row_dict[rc])
+                            val = row_dict[rc]
+                            if isinstance(val, datetime):
+                                val = str(val)
+                            insert_vals.append(val)
                     
                     if not insert_cols:
                         continue
@@ -1156,6 +1205,10 @@ class SyncManager:
             
         except Exception as e:
             print(f"Error syncing portal table {table_name} remote to local: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
             return 0
     
     def _sync_portal_table_local_to_remote(self, local_conn, remote_conn, table_name):
@@ -1339,6 +1392,10 @@ class SyncManager:
             
         except Exception as e:
             print(f"Error syncing portal table {table_name} local to remote: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
             return 0
 
     def _sync_table_full_mirror(self, local_conn, remote_conn, table_name):
@@ -1472,6 +1529,10 @@ class SyncManager:
 
         except Exception as e:
             print(f"[Full Mirror] Error mirroring {table_name}: {e}")
+            try:
+                remote_conn.rollback()
+            except Exception:
+                pass
             return 0
 
     def _enforce_local_unique_constraints(self, local_conn):

@@ -14818,7 +14818,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
             pady=5,
             cursor='hand2',
             relief='flat',
-            command=self._refresh_portal_requests
+            command=self._manual_refresh_requests
         )
         refresh_btn.pack(side=tk.LEFT)
         
@@ -15221,9 +15221,26 @@ Note: This is an automated email. Please find the attached formal overdue letter
         except Exception as e:
             self._show_empty_message(self.requests_container, "Could not load requests", f"Portal server may not be running.\n{str(e)}")
 
+    def _manual_refresh_requests(self):
+        """Immediately refresh local UI, then trigger a quick cloud pull for requests and refresh again."""
+        self._refresh_portal_requests()
+        if hasattr(self, 'sync_manager') and self.sync_manager:
+            import threading as _threading
+            def _pull_and_refresh():
+                try:
+                    res = self.sync_manager.sync_now(
+                        direction='both',
+                        tables_override=['requests', 'deletion_requests']
+                    )
+                    if res.get('records_synced', 0) > 0:
+                        self.root.after(0, self._refresh_portal_requests)
+                except Exception:
+                    pass
+            _threading.Thread(target=_pull_and_refresh, daemon=True).start()
+
     def _start_requests_auto_refresh(self):
         """Periodically poll the portal API so new requests appear automatically.
-        Bug 10 Fix: HTTP call runs in a daemon thread; Tkinter UI never blocked."""
+        Bug 10 Fix: HTTP and cloud pull run in a daemon thread; Tkinter UI never blocked."""
         if not WEB_PORTAL_AVAILABLE:
             return
         # Only refresh if we're NOT in history mode
@@ -15231,7 +15248,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
             import threading as _threading
             def _bg_refresh():
                 try:
-                    self._refresh_portal_requests()
+                    if hasattr(self, 'sync_manager') and self.sync_manager:
+                        try:
+                            self.sync_manager.sync_now(
+                                direction='remote_to_local',
+                                tables_override=['requests', 'deletion_requests']
+                            )
+                        except Exception:
+                            pass
+                    self.root.after(0, self._refresh_portal_requests)
                 except Exception:
                     pass
             _threading.Thread(target=_bg_refresh, daemon=True).start()
@@ -15628,6 +15653,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 # Refresh students list immediately if approved
                 if action == 'approve':
                     self.refresh_students()
+                if hasattr(self, 'sync_manager') and self.sync_manager:
+                    import threading as _threading
+                    _threading.Thread(
+                        target=lambda: self.sync_manager.sync_now(
+                            direction='local_to_remote',
+                            tables_override=['requests', 'deletion_requests']
+                        ),
+                        daemon=True
+                    ).start()
             else:
                 messagebox.showerror("Error", result.get('message', 'Action failed'))
         except urllib.error.HTTPError as e:
@@ -16196,6 +16230,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 # Refresh students list since student was removed from library DB
                 if action == 'approve':
                     self.refresh_students()
+                if hasattr(self, 'sync_manager') and self.sync_manager:
+                    import threading as _threading
+                    _threading.Thread(
+                        target=lambda: self.sync_manager.sync_now(
+                            direction='local_to_remote',
+                            tables_override=['deletion_requests', 'students']
+                        ),
+                        daemon=True
+                    ).start()
             else:
                 messagebox.showerror("Error", result.get('message', 'Action failed'))
         except Exception as e:
