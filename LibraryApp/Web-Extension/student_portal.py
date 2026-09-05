@@ -1413,7 +1413,7 @@ def init_portal_db():
             cursor.execute(migration_sql)
             conn.commit()
         except Exception:
-            pass  # Column already exists
+            conn.rollback()  # Handle aborted transaction if column already exists
 
     # FIX 2.18: Create failed_emails table for retry tracking
     create_table_safe(cursor, 'failed_emails', '''
