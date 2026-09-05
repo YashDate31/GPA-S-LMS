@@ -7399,7 +7399,7 @@ Current Settings:
         """Show add book dialog"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Add New Book")
-        dialog.geometry("500x620")
+        dialog.geometry("650x650")
         dialog.configure(bg='white')
         dialog.transient(self.root)
         dialog.grab_set()
