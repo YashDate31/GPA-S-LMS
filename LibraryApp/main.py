@@ -11824,10 +11824,12 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                 union_acc.sort()
                             new_barcode = ','.join(union_acc)
 
-                            # BUG-FIX: Trust accession list as ground truth for copy count.
-                            # Using max(ex_total, len(union_acc)) would prevent fixing a corrupted ex_total
-                            # (e.g. if ex_total was erroneously set to 18000, max() would keep it forever).
-                            new_total = len(union_acc)
+                            # Trust the DECLARED copies (from TOTAL BOOK column) when it is
+                            # larger than the number of accession IDs actually collected.
+                            # The Excel often stores only range-marker IDs (e.g. first + last),
+                            # not every individual accession number, so len(union_acc) would
+                            # undercount the real copy total.
+                            new_total = max(copies_val, len(union_acc))
                         else:
                             # No per-copy accession IDs available: use incoming value as authoritative
                             # (don't use max() here either — if copies_val is sane and ex_total is not, fix it)
@@ -11858,7 +11860,10 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         except Exception:
                             acc_list.sort()
                         accession_csv = ','.join(acc_list)
-                        copies_val = max(1, len(acc_list))
+                        # Use declared copies when it is larger than the number of
+                        # accession IDs collected (Excel may store only range markers,
+                        # not every individual number, so len(acc_list) would undercount).
+                        copies_val = max(copies_val, len(acc_list))
                     else:
                         accession_csv = ''
 
