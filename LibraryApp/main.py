@@ -11507,7 +11507,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
                     if col_catalog:
                         cat_raw = row.get(col_catalog, '')
                         if not is_nan_val(cat_raw):
-                            raw_book_id = safe_str(cat_raw)
+                            # Strip leading dots/spaces (Excel sometimes adds ".1-50" for the first row)
+                            raw_book_id = safe_str(cat_raw).lstrip('. \t')
 
                     # Start a new logical book row
                     current_book = {

@@ -979,6 +979,22 @@ class Database:
         row = cursor.fetchone()
         if row:
             return row[0]
+        # 3. Range-format book_id: check if the input number falls within START-END
+        #    e.g. book_id='6835-6839' and user typed '6835', '6836', ..., '6839'
+        try:
+            bid_int = int(bid)
+            cursor.execute("SELECT book_id FROM books WHERE book_id LIKE '%-%'")
+            for (stored_id,) in cursor.fetchall() or []:
+                parts = str(stored_id).lstrip('.').split('-')
+                if len(parts) == 2:
+                    try:
+                        lo, hi = int(parts[0]), int(parts[1])
+                        if lo <= bid_int <= hi:
+                            return stored_id
+                    except ValueError:
+                        pass
+        except (ValueError, TypeError):
+            pass
         return None
 
     def borrow_book(self, enrollment_no, book_id, borrow_date, due_date):
@@ -1394,7 +1410,26 @@ class Database:
                 "SELECT * FROM books WHERE ','||COALESCE(barcode,'')||',' LIKE ?",
                 (f'%,{bid},%',)
             )
-            return cursor.fetchone()
+            row = cursor.fetchone()
+            if row:
+                return row
+            # Fallback: range-format book_id (e.g. '6835-6839') — check if input falls in range
+            try:
+                bid_int = int(bid)
+                cursor.execute("SELECT * FROM books WHERE book_id LIKE '%-%'")
+                for r in cursor.fetchall() or []:
+                    stored_id = str(r[1])  # book_id is column index 1
+                    parts = stored_id.lstrip('.').split('-')
+                    if len(parts) == 2:
+                        try:
+                            lo, hi = int(parts[0]), int(parts[1])
+                            if lo <= bid_int <= hi:
+                                return r
+                        except ValueError:
+                            pass
+            except (ValueError, TypeError):
+                pass
+            return None
         except:
             return None
         finally:
