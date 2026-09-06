@@ -11422,7 +11422,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
             col_map = {str(c).strip().lower(): c for c in df_cols}
 
             col_srno      = get_col(col_map, 'sr no', 'sr. no.', 'sr .no', 'sr.no', 'srno')
-            col_catalog   = get_col(col_map, 'actual no', 'actual  no', 'actual no ', 'sr no', 'srno')
+            col_catalog   = get_col(col_map, 'book id', 'book_id', 'actual no', 'actual  no', 'actual no ', 'sr no', 'srno')
             col_author    = get_col(col_map, 'author')
             col_title     = get_col(col_map, 'tital', 'title', 'book title', 'book name')
             col_publisher = get_col(col_map, ' publisher', 'publisher', 'publisher name')
@@ -11502,6 +11502,13 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 row_acc = collect_accessions_from_row(row)
 
                 if title_val:
+                    # Read the raw Book ID / catalog value from column A (e.g. "1-50", "51-100")
+                    raw_book_id = ''
+                    if col_catalog:
+                        cat_raw = row.get(col_catalog, '')
+                        if not is_nan_val(cat_raw):
+                            raw_book_id = safe_str(cat_raw)
+
                     # Start a new logical book row
                     current_book = {
                         'title': title_val,
@@ -11510,6 +11517,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         'price': price_val,
                         '_copies_declared': copies_val,
                         '_acc_list': row_acc[:],
+                        '_raw_book_id': raw_book_id,
                         'sheet': sheet_name
                     }
                     results.append(current_book)
@@ -11533,12 +11541,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 if copies_val <= 1 and len(all_acc) > 1:
                     copies_val = len(all_acc)
 
+                # Prefer the raw Book ID from the Excel (e.g. "1-50") over computed range
+                raw_bid = safe_str(b.get('_raw_book_id', ''))
+                final_book_id = raw_bid or range_str or first_id
+
                 finalized.append({
                     'title': b.get('title', ''),
                     'author': b.get('author', ''),
                     'publisher': b.get('publisher', ''),
                     'copies': copies_val,
-                    'book_id': range_str or first_id,
+                    'book_id': final_book_id,
                     'accession_csv': csv_str,
                     'price': b.get('price', 0.0),
                     'sheet': b.get('sheet', sheet_name)
