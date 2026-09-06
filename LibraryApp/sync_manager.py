@@ -163,7 +163,7 @@ class SyncManager:
                 pass
         return '2000-01-01 00:00:00'
     
-    def _save_sync_time(self, status='completed'):
+    def _save_sync_time(self, status='completed', advance_cutoff=True):
         """Save current sync timestamp"""
         timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         try:
@@ -176,7 +176,7 @@ class SyncManager:
                 except Exception:
                     pass
 
-            if status == 'completed':
+            if status == 'completed' and advance_cutoff:
                 last_successful = timestamp
 
             with open(self.sync_log_path, 'w') as f:
@@ -185,11 +185,10 @@ class SyncManager:
                     'last_successful_sync': last_successful,
                     'status': status
                 }, f, indent=4)
-            # CRITICAL: advance cutoff ONLY on fully successful sync.
-            # If we advance on completed_with_errors, failed rows/tables get skipped
-            # in later delta cycles (their updated_at <= new cutoff), causing stale
-            # cloud data and "old data coming back" symptoms on web.
-            if status == 'completed':
+            # CRITICAL: advance cutoff ONLY on fully successful sync that covers all default tables.
+            # If we advance on targeted/partial table syncs or completed_with_errors,
+            # other tables miss delta changes (their updated_at <= new cutoff).
+            if status == 'completed' and advance_cutoff:
                 self.last_sync_time = timestamp
         except Exception as e:
             print(f"Error saving sync time: {e}")
@@ -502,10 +501,11 @@ class SyncManager:
             # Save sync time with status
             if results['success']:
                 self._register_sync_success()
-                self._save_sync_time(status='completed')
+                advance = tables_override is None or set(tables_override) >= set(default_tables_to_sync)
+                self._save_sync_time(status='completed', advance_cutoff=advance)
             else:
                 self._register_sync_failure('; '.join(results['errors']) if results['errors'] else 'sync errors')
-                self._save_sync_time(status='completed_with_errors')
+                self._save_sync_time(status='completed_with_errors', advance_cutoff=False)
             
         except Exception as e:
             results['errors'].append(f"Connection error: {str(e)}")
@@ -1618,13 +1618,10 @@ class SyncManager:
                 try:
                     cycle_count += 1
                     # Periodic delta sync (light — delta since last sync)
-                    light_tables = ['students', 'borrow_records', 'admin_activity',
+                    light_tables = ['students', 'books', 'borrow_records', 'admin_activity',
                                     'academic_years', 'promotion_history', 'system_settings',
                                     'requests', 'deletion_requests', 'student_auth', 'notices']
                     tables_for_run = list(light_tables)
-                    # Every 4th cycle, include books for eventual consistency
-                    if cycle_count % 4 == 0:
-                        tables_for_run.insert(1, 'books')
                     result = self.sync_now(direction='both', tables_override=tables_for_run)
                     if result.get('success'):
                         print(f"[Auto-Sync] Completed: {result.get('records_synced', 0)} records synced")

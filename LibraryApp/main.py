@@ -196,6 +196,28 @@ class LibraryApp:
         except Exception as e:
             print(f"[Settings Sync] Unable to start immediate settings sync: {e}")
 
+    def _sync_books_now(self):
+        """Best-effort fast push of books to cloud (non-blocking)."""
+        try:
+            if not getattr(self, 'sync_manager', None):
+                return
+
+            def _do_sync_books():
+                try:
+                    for _ in range(5):
+                        if not self.sync_manager.is_syncing:
+                            res = self.sync_manager.sync_now(direction='local_to_remote', tables_override=['books'])
+                            if res.get('success'):
+                                print(f"[Books Sync] Fast push completed: {res.get('records_synced', 0)} records")
+                                return
+                        time.sleep(1.5)
+                except Exception as e:
+                    print(f"[Books Sync] Immediate books sync failed: {e}")
+
+            threading.Thread(target=_do_sync_books, daemon=True).start()
+        except Exception as e:
+            print(f"[Books Sync] Unable to start immediate books sync: {e}")
+
     def run_in_background_thread(self, target, callback, **kwargs):
         """Helper to run a function in a background thread and callback on main thread."""
         def wrapper():
@@ -6821,6 +6843,7 @@ Current Settings:
                 dialog.destroy()
                 self.refresh_books()
                 self.refresh_dashboard()
+                self._sync_books_now()
             else:
                 messagebox.showerror("Error", message)
         
@@ -6843,6 +6866,7 @@ Current Settings:
                     dialog.destroy()
                     self.refresh_books()
                     self.refresh_dashboard()
+                    self._sync_books_now()
                 else:
                     messagebox.showerror("Error", message)
         
@@ -7812,6 +7836,7 @@ Current Settings:
                     dialog.destroy()
                     self.refresh_books()
                     self.refresh_dashboard()
+                    self._sync_books_now()
                     return
                 # else NO - continue adding as separate entry
 
@@ -7839,6 +7864,7 @@ Current Settings:
                 self.refresh_books()
                 # Update dashboard statistics
                 self.refresh_dashboard()
+                self._sync_books_now()
             else:
                 messagebox.showerror("Error", message)
         
@@ -11924,6 +11950,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
             if success_count > 0 or merged_count > 0:
                 self.refresh_books()
                 self.refresh_dashboard()
+                self._sync_books_now()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to import Excel file:\n{str(e)}")
