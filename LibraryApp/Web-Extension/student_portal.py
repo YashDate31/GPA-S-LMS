@@ -1403,17 +1403,35 @@ def init_portal_db():
     conn.commit()
 
     # --- Schema migrations for existing tables ---
-    # FIX 2.8: Add notified_at timestamp for waitlist expiry tracking
-    for migration_sql in [
-        "ALTER TABLE book_waitlist ADD COLUMN notified_at TEXT",
-        "ALTER TABLE study_materials ADD COLUMN drive_link TEXT",
-        "ALTER TABLE requests ADD COLUMN approved_at TEXT",  # FIX 2.1: collection deadline
-    ]:
+    # Each migration uses a DO $$ block so Postgres silently skips if the column
+    # already exists — safe to run on every startup / re-deploy.
+    _migrations = [
+        # FIX 2.8: Add notified_at timestamp for waitlist expiry tracking
+        ("book_waitlist",   "notified_at",  "TEXT"),
+        ("study_materials", "drive_link",   "TEXT"),
+        ("requests",        "approved_at",  "TEXT"),   # FIX 2.1: collection deadline
+    ]
+    for tbl, col, col_type in _migrations:
         try:
-            cursor.execute(migration_sql)
+            # SQLite: plain ALTER TABLE (fails silently via except)
+            # Postgres: DO $$ block that catches duplicate_column so no transaction abort
+            if _is_postgres_connection(conn):
+                cursor.execute(f"""
+                    DO $$
+                    BEGIN
+                        ALTER TABLE {tbl} ADD COLUMN {col} {col_type};
+                    EXCEPTION WHEN duplicate_column THEN
+                        NULL;
+                    END $$;
+                """)
+            else:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}")
             conn.commit()
         except Exception:
-            conn.rollback()  # Handle aborted transaction if column already exists
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     # FIX 2.18: Create failed_emails table for retry tracking
     create_table_safe(cursor, 'failed_emails', '''

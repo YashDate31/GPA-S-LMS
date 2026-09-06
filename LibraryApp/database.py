@@ -120,6 +120,12 @@ class PostgresConnectionWrapper:
     def commit(self):
         self.conn.commit()
     
+    def rollback(self):
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
     def close(self):
         if self._pool:
             # Return connection to pool instead of closing
