@@ -51,6 +51,7 @@ LibraryApp/app_config.json
 # Environment files
 .env
 .env.*
+!.env.example
 
 # Secret keys
 *.secret_key
