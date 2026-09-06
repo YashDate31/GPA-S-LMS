@@ -11684,8 +11684,14 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                         seen.add(x)
                                         merged.append(x)
                                 books_map[key]['accession_csv'] = ','.join(merged)
-                                # If we have accession IDs, treat them as the true copy count
-                                books_map[key]['copies'] = max(1, len(merged))
+                                # Keep the accumulated DECLARED copies (from TOTAL BOOK column)
+                                # as authoritative. Only use len(merged) if it is larger,
+                                # which would mean the accession list actually contains all
+                                # individual copy IDs (not just range markers).
+                                # CRITICAL: do NOT override accumulated declared copies with
+                                # len(merged) — that throws away the correct total!
+                                acc_count = len(merged)
+                                books_map[key]['copies'] = max(books_map[key]['copies'], acc_count)
                         else:
                             books_map[key] = dict(book)
 
