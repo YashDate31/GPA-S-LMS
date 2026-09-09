@@ -11557,9 +11557,31 @@ Note: This is an automated email. Please find the attached formal overdue letter
                     if copies_val is not None and (current_book.get('_copies_declared') is None):
                         current_book['_copies_declared'] = copies_val
 
+            # ── Post-pass: merge rows that share the same catalog/SR NO within this
+            # sheet. The GPA Excel sometimes lists the same catalog entry (same SR NO)
+            # on two separate rows (one copy per row) instead of using overflow columns.
+            # We unify them into a single book entry so no copies are silently dropped.
+            catalog_merged = {}  # key = (norm_title, norm_author, norm_book_id)
+            catalog_order  = []  # preserve first-seen insertion order
+            for b in results:
+                raw_bid = safe_str(b.get('_raw_book_id', ''))
+                bid_key = normalize(raw_bid) if raw_bid else ''
+                key = (normalize(b.get('title', '')), normalize(b.get('author', '')), bid_key)
+                if key in catalog_merged:
+                    # Same catalog entry seen again — accumulate accessions and copies
+                    existing = catalog_merged[key]
+                    existing['_acc_list'].extend(b.get('_acc_list', []))
+                    if b.get('_copies_declared') is not None:
+                        prev = existing.get('_copies_declared')
+                        existing['_copies_declared'] = (prev or 0) + b['_copies_declared']
+                else:
+                    catalog_merged[key] = b
+                    catalog_order.append(key)
+
             # Finalize computed fields
             finalized = []
-            for b in results:
+            for k in catalog_order:
+                b = catalog_merged[k]
                 all_acc = dedupe_keep_order(b.get('_acc_list', []))
                 first_id, range_str, csv_str = make_accession_info(all_acc)
 
@@ -11693,9 +11715,14 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
                     sheets_processed.append(f"{sheet_name}({fmt},{len(parsed)})")
 
-                    # Merge into books_map — same title+author → accumulate copies
+                    # Merge into books_map — same title+author+book_id → accumulate copies.
+                    # Including book_id in the key ensures that books sharing the same
+                    # title and author but with DIFFERENT catalog/SR numbers (genuinely
+                    # different acquisition entries) are kept as separate records.
+                    # Cross-sheet duplicates of the SAME catalog entry are still merged.
                     for book in parsed:
-                        key = (normalize(book['title']), normalize(book['author']))
+                        book_id_norm = normalize(safe_str(book.get('book_id', '')))
+                        key = (normalize(book['title']), normalize(book['author']), book_id_norm)
                         if key in books_map:
                             books_map[key]['copies'] += book.get('copies', 0)
                             # Merge accession lists (copy IDs) when available
@@ -11840,8 +11867,11 @@ Note: This is an automated email. Please find the attached formal overdue letter
                     acc_list = _parse_acc_csv(book.get('accession_csv', ''))
                     acc_set = set(acc_list)
 
-                    if key in existing_by_key:
-                        ex_book_id, ex_total, ex_avail, ex_barcode = existing_by_key[key]
+                    # Lookup against DB uses only (title, author) — book_id may differ
+                    # between what's in DB and what's in the import (e.g., range vs single)
+                    db_key = (normalize(title_val), normalize(author_val))
+                    if db_key in existing_by_key:
+                        ex_book_id, ex_total, ex_avail, ex_barcode = existing_by_key[db_key]
                         ex_acc_list = _parse_acc_csv(ex_barcode)
                         ex_acc_set = set(ex_acc_list)
                         other_used = used_accessions - ex_acc_set
@@ -11878,7 +11908,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                 "UPDATE books SET total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP WHERE book_id=?",
                                 (new_total, new_avail, new_barcode or None, price_val, ex_book_id)
                             )
-                        existing_by_key[key] = (ex_book_id, new_total, new_avail, new_barcode)
+                        existing_by_key[db_key] = (ex_book_id, new_total, new_avail, new_barcode)
                         used_accessions.update(_parse_acc_csv(new_barcode))
                         merged_count += 1
                         continue
