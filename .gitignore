@@ -12,26 +12,67 @@ __pycache__/
 build/
 dist/
 *.spec
-# IDE
+
+# IDE & Editor files
 .vscode/
+.idea/
 
 # Database files
 *.db
 *.db-shm
 *.db-wal
 
-# Generated documents
+# Generated documents, reports & spreadsheets
 *.docx
 *.xlsx
+*.pdf
+*.csv
+
+# System & shortcut files
+desktop.ini
+Thumbs.db
+.DS_Store
+*.url
 
 # Logs and temp files
 *.log
 tempCodeRunnerFile.py
 sync_log.json
 email_history.json
+find_isbn_output.txt
+walkthrough.md.resolved
+*.resolved
 
-# Node modules
+# Root scratch, audit, and one-off debug scripts
+check_*.py
+inspect_excel*.py
+audit_*.py
+fix_*.py
+wipe.py
+find_isbn.py
+force_sync_*.py
+insert_student.py
+test_insert_*.py
+init_library_missing_tables.py
+init_portal_postgres.py
+init_postgres.py
+
+# LibraryApp scratch, demo, patch & test scripts
+LibraryApp/test.py
+LibraryApp/test_*.py
+LibraryApp/create_demo_data.py
+LibraryApp/add_demo_data.py
+LibraryApp/fetch_book_covers.py
+LibraryApp/fix_cloud_borrow_records.py
+LibraryApp/patch_sync_wishlist.py
+LibraryApp/patch_wishlist_rating.py
+LibraryApp/run_supabase_migration.py
+LibraryApp/optimize_database.py
+
+# Node & Frontend
 node_modules/
+.eslintcache
+LibraryApp/Web-Extension/frontend/scratch/
 
 # Frontend build output - tracked on deployment branch for Render
 !LibraryApp/Web-Extension/frontend/dist/
