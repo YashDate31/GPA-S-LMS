@@ -11365,8 +11365,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
         except Exception as e:
             messagebox.showerror("Error", f"Failed to generate Word overdue notice: {e}")
     
-    def import_books_from_excel(self):
-        """Import books from Excel file.
+    def import_books_from_excel(self, file_path_override=None):
+        """Import books from Excel, handling GPA-format, bookbank-format, or standard LMS format.
         Supports three formats detected automatically:
         1. GPA Library Format (multi-sheet: ME/EE/IT/ETC/AE/CE/computer):
            Sr No | Actual NO | Author | Tital | Publisher | TOTAL BOOK | Accession Number | ...
@@ -11381,7 +11381,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
         """
         import math
 
-        file_path = filedialog.askopenfilename(
+        file_path = file_path_override or filedialog.askopenfilename(
             title="Select Excel file to import",
             filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
         )
@@ -11401,6 +11401,20 @@ Note: This is an automated email. Please find the attached formal overdue letter
         def safe_str(v):
             s = str(v).strip()
             return '' if s.lower() == 'nan' else s
+
+        def clean_id(v):
+            if v is None or is_nan_val(v):
+                return ''
+            s = safe_str(v).lstrip('. \t')
+            if not s:
+                return ''
+            try:
+                f = float(s)
+                if f.is_integer():
+                    return str(int(f))
+            except Exception:
+                pass
+            return s
 
         def safe_int(v, default=1):
             try:
@@ -11528,13 +11542,12 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 row_acc = collect_accessions_from_row(row)
 
                 if title_val:
-                    # Read the raw Book ID / catalog value from column A (e.g. "1-50", "51-100")
+                    # Read the raw Book ID / catalog value (Actual NO or fallback to SR NO)
                     raw_book_id = ''
                     if col_catalog:
-                        cat_raw = row.get(col_catalog, '')
-                        if not is_nan_val(cat_raw):
-                            # Strip leading dots/spaces (Excel sometimes adds ".1-50" for the first row)
-                            raw_book_id = safe_str(cat_raw).lstrip('. \t')
+                        raw_book_id = clean_id(row.get(col_catalog, ''))
+                    if not raw_book_id and col_srno:
+                        raw_book_id = clean_id(row.get(col_srno, ''))
 
                     # Start a new logical book row
                     current_book = {
@@ -11563,10 +11576,14 @@ Note: This is an automated email. Please find the attached formal overdue letter
             # We unify them into a single book entry so no copies are silently dropped.
             catalog_merged = {}  # key = (norm_title, norm_author, norm_book_id)
             catalog_order  = []  # preserve first-seen insertion order
-            for b in results:
+            for b_idx, b in enumerate(results):
                 raw_bid = safe_str(b.get('_raw_book_id', ''))
-                bid_key = normalize(raw_bid) if raw_bid else ''
-                key = (normalize(b.get('title', '')), normalize(b.get('author', '')), bid_key)
+                bid_key = normalize(raw_bid)
+                if bid_key:
+                    key = (normalize(b.get('title', '')), normalize(b.get('author', '')), bid_key)
+                else:
+                    # Keep rows without catalog ID distinct so same-title entries are not merged
+                    key = (normalize(b.get('title', '')), normalize(b.get('author', '')), f"__row_{b_idx}")
                 if key in catalog_merged:
                     # Same catalog entry seen again — accumulate accessions and copies
                     existing = catalog_merged[key]
@@ -11590,8 +11607,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 if copies_val <= 1 and len(all_acc) > 1:
                     copies_val = len(all_acc)
 
-                # Prefer the raw Book ID from the Excel (e.g. "1-50") over computed range
-                raw_bid = safe_str(b.get('_raw_book_id', ''))
+                # Prefer the raw Book ID from the Excel (e.g. "687", "1-50") over computed range
+                raw_bid = clean_id(b.get('_raw_book_id', ''))
                 final_book_id = raw_bid or range_str or first_id
 
                 finalized.append({
@@ -11715,12 +11732,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
                     sheets_processed.append(f"{sheet_name}({fmt},{len(parsed)})")
 
-                    # Merge into books_map — same title+author → accumulate copies.
-                    # Merging across all sheets ensures that multi-branch titles (e.g. Maths, Mechanics,
-                    # Electrical, etc.) correctly combine copy totals into a single authoritative book
-                    # entry rather than creating duplicate title records.
-                    for book in parsed:
-                        key = (normalize(book['title']), normalize(book['author']))
+                    # Merge into books_map — books with matching (title, author, book_id) accumulate copies.
+                    # Preserves each distinct book line from the Excel while merging identical branch acquisitions.
+                    for b_idx, book in enumerate(parsed):
+                        bid = clean_id(book.get('book_id', ''))
+                        bid_norm = normalize(bid)
+                        if bid_norm:
+                            key = (normalize(book['title']), normalize(book['author']), bid_norm)
+                        else:
+                            key = (normalize(book['title']), normalize(book['author']), f"__un_{sheet_name}_{b_idx}")
+
                         if key in books_map:
                             books_map[key]['copies'] += book.get('copies', 0)
                             # Merge accession lists (copy IDs) when available
@@ -11739,14 +11760,16 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                 acc_count = len(merged)
                                 books_map[key]['copies'] = max(books_map[key]['copies'], acc_count)
                             # Inherit missing fields from other sheets if not present in the first sheet
-                            if not books_map[key].get('book_id') and book.get('book_id'):
-                                books_map[key]['book_id'] = book.get('book_id')
+                            if not books_map[key].get('book_id') and bid:
+                                books_map[key]['book_id'] = bid
                             if (not books_map[key].get('price') or books_map[key].get('price') == 0.0) and book.get('price'):
                                 books_map[key]['price'] = book.get('price')
                             if not books_map[key].get('publisher') and book.get('publisher'):
                                 books_map[key]['publisher'] = book.get('publisher')
                         else:
                             books_map[key] = dict(book)
+                            if bid:
+                                books_map[key]['book_id'] = bid
 
                 except Exception as e:
                     print(f"[ImportBooks] Sheet '{sheet_name}' skipped: {e}")
@@ -11763,17 +11786,22 @@ Note: This is an automated email. Please find the attached formal overdue letter
                               'total_books':'total_copies','sr_no':'book_id'}
                         df.rename(columns={k:v for k,v in rn.items() if k in df.columns}, inplace=True)
                         if 'title' not in df.columns: continue
-                        for _, row in df.iterrows():
+                        for row_idx, row in df.iterrows():
                             title_val  = safe_str(row.get('title',''))
                             if not title_val: continue
                             author_val = safe_str(row.get('author',''))
-                            key = (normalize(title_val), normalize(author_val))
+                            book_id_raw = clean_id(row.get('book_id',''))
+                            b_id_norm = normalize(book_id_raw)
+                            if b_id_norm:
+                                key = (normalize(title_val), normalize(author_val), b_id_norm)
+                            else:
+                                key = (normalize(title_val), normalize(author_val), f"__fb_{sheet_name}_{row_idx}")
                             if key not in books_map:
                                 books_map[key] = {
                                     'title': title_val, 'author': author_val,
                                     'publisher': safe_str(row.get('isbn','')),
                                     'copies': safe_int(row.get('total_copies',1)),
-                                    'book_id': safe_str(row.get('book_id','')),
+                                    'book_id': book_id_raw,
                                     'price': safe_float(row.get('price',0)),
                                     'sheet': sheet_name
                                 }
@@ -11819,7 +11847,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
             # Preload existing books for faster matching
             cur.execute("SELECT book_id, title, author, total_copies, available_copies, barcode FROM books")
-            existing_by_key = {}
+            existing_by_full_key = {}  # (norm_title, norm_author, norm_book_id) -> record
+            existing_by_id = {}        # norm_book_id -> record
             used_accessions = set()
             max_numeric_book_id = 1000
 
@@ -11831,8 +11860,13 @@ Note: This is an automated email. Please find the attached formal overdue letter
                 ex_avail = int(row[4] or 0)
                 ex_barcode = str(row[5] or '')
 
-                ek = (normalize(ex_title), normalize(ex_author))
-                existing_by_key[ek] = (ex_book_id, ex_total, ex_avail, ex_barcode)
+                record = (ex_book_id, ex_total, ex_avail, ex_barcode)
+                bid_norm = normalize(clean_id(ex_book_id))
+                if bid_norm:
+                    existing_by_id[bid_norm] = record
+
+                full_k = (normalize(ex_title), normalize(ex_author), bid_norm)
+                existing_by_full_key[full_k] = record
 
                 # Track already-used copy IDs (accession numbers) across the whole library
                 for acc in _parse_acc_csv(ex_barcode):
@@ -11859,18 +11893,28 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         continue
 
                     copies_val    = max(int(book.get('copies', 1) or 1), 1)
-                    book_id_v     = safe_str(book.get('book_id', ''))
+                    book_id_v     = clean_id(book.get('book_id', ''))
                     publisher     = safe_str(book.get('publisher', ''))
                     price_val     = float(book.get('price', 0.0) or 0.0)
 
                     acc_list = _parse_acc_csv(book.get('accession_csv', ''))
                     acc_set = set(acc_list)
 
-                    # Lookup against DB uses only (title, author) — book_id may differ
-                    # between what's in DB and what's in the import (e.g., range vs single)
-                    db_key = (normalize(title_val), normalize(author_val))
-                    if db_key in existing_by_key:
-                        ex_book_id, ex_total, ex_avail, ex_barcode = existing_by_key[db_key]
+                    b_id_norm = normalize(book_id_v)
+                    full_key = (normalize(title_val), normalize(author_val), b_id_norm)
+
+                    # Lookup against DB:
+                    # 1) Exact 3-tuple match (title, author, book_id)
+                    # 2) Or if book_id is present, match existing book with that book_id
+                    # 3) If book_id is empty, match (title, author, '')
+                    match = None
+                    if full_key in existing_by_full_key:
+                        match = existing_by_full_key[full_key]
+                    elif b_id_norm and b_id_norm in existing_by_id:
+                        match = existing_by_id[b_id_norm]
+
+                    if match:
+                        ex_book_id, ex_total, ex_avail, ex_barcode = match
                         ex_acc_list = _parse_acc_csv(ex_barcode)
                         ex_acc_set = set(ex_acc_list)
                         other_used = used_accessions - ex_acc_set
@@ -11888,13 +11932,8 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
                             # Trust the DECLARED copies (from TOTAL BOOK column) when it is
                             # larger than the number of accession IDs actually collected.
-                            # The Excel often stores only range-marker IDs (e.g. first + last),
-                            # not every individual accession number, so len(union_acc) would
-                            # undercount the real copy total.
                             new_total = max(copies_val, len(union_acc))
                         else:
-                            # No per-copy accession IDs available: use incoming value as authoritative
-                            # (don't use max() here either — if copies_val is sane and ex_total is not, fix it)
                             new_barcode = ex_barcode or ''
                             new_total = copies_val if copies_val > 0 else ex_total
 
@@ -11907,7 +11946,12 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                 "UPDATE books SET total_copies=?, available_copies=?, barcode=?, price=?, updated_at=CURRENT_TIMESTAMP WHERE book_id=?",
                                 (new_total, new_avail, new_barcode or None, price_val, ex_book_id)
                             )
-                        existing_by_key[db_key] = (ex_book_id, new_total, new_avail, new_barcode)
+                        updated_rec = (ex_book_id, new_total, new_avail, new_barcode)
+                        existing_by_full_key[full_key] = updated_rec
+                        ex_b_norm = normalize(clean_id(ex_book_id))
+                        if ex_b_norm:
+                            existing_by_id[ex_b_norm] = updated_rec
+                            existing_by_full_key[(normalize(title_val), normalize(author_val), ex_b_norm)] = updated_rec
                         used_accessions.update(_parse_acc_csv(new_barcode))
                         merged_count += 1
                         continue
@@ -11922,9 +11966,6 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         except Exception:
                             acc_list.sort()
                         accession_csv = ','.join(acc_list)
-                        # Use declared copies when it is larger than the number of
-                        # accession IDs collected (Excel may store only range markers,
-                        # not every individual number, so len(acc_list) would undercount).
                         copies_val = max(copies_val, len(acc_list))
                     else:
                         accession_csv = ''
@@ -11949,7 +11990,12 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         (book_id_v, title_val, author_val, publisher, 'Technology', copies_val, copies_val, accession_csv or None, price_val)
                     )
                     used_accessions.update(_parse_acc_csv(accession_csv))
-                    existing_by_key[db_key] = (book_id_v, copies_val, copies_val, accession_csv)
+                    new_rec = (book_id_v, copies_val, copies_val, accession_csv)
+                    existing_by_full_key[full_key] = new_rec
+                    new_b_norm = normalize(clean_id(book_id_v))
+                    if new_b_norm:
+                        existing_by_id[new_b_norm] = new_rec
+                        existing_by_full_key[(normalize(title_val), normalize(author_val), new_b_norm)] = new_rec
                     success_count += 1
 
                 except Exception as e:
@@ -11963,11 +12009,11 @@ Note: This is an automated email. Please find the attached formal overdue letter
             sheets_str = ', '.join(sheets_processed) if sheets_processed else 'auto-detected'
             result_msg = (
                 f"Import completed!\n\n"
-                f"📄  Sheets processed : {len(sheets_processed)}\n"
-                f"📚  Unique books found: {len(books_map)}\n\n"
-                f"✅  New books added   : {success_count}\n"
-                f"🔁  Copies merged     : {merged_count}  (same title+author already in DB)\n"
-                f"❌  Errors            : {error_count}\n\n"
+                f"- Sheets processed : {len(sheets_processed)}\n"
+                f"- Unique books found: {len(books_map)}\n\n"
+                f"- New books added   : {success_count}\n"
+                f"- Copies merged     : {merged_count} (matching books updated in DB)\n"
+                f"- Errors            : {error_count}\n\n"
                 f"Sheets: {sheets_str}"
             )
             if errors:
