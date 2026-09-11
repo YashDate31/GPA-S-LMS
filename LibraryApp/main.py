@@ -11715,14 +11715,12 @@ Note: This is an automated email. Please find the attached formal overdue letter
 
                     sheets_processed.append(f"{sheet_name}({fmt},{len(parsed)})")
 
-                    # Merge into books_map — same title+author+book_id → accumulate copies.
-                    # Including book_id in the key ensures that books sharing the same
-                    # title and author but with DIFFERENT catalog/SR numbers (genuinely
-                    # different acquisition entries) are kept as separate records.
-                    # Cross-sheet duplicates of the SAME catalog entry are still merged.
+                    # Merge into books_map — same title+author → accumulate copies.
+                    # Merging across all sheets ensures that multi-branch titles (e.g. Maths, Mechanics,
+                    # Electrical, etc.) correctly combine copy totals into a single authoritative book
+                    # entry rather than creating duplicate title records.
                     for book in parsed:
-                        book_id_norm = normalize(safe_str(book.get('book_id', '')))
-                        key = (normalize(book['title']), normalize(book['author']), book_id_norm)
+                        key = (normalize(book['title']), normalize(book['author']))
                         if key in books_map:
                             books_map[key]['copies'] += book.get('copies', 0)
                             # Merge accession lists (copy IDs) when available
@@ -11738,14 +11736,15 @@ Note: This is an automated email. Please find the attached formal overdue letter
                                         seen.add(x)
                                         merged.append(x)
                                 books_map[key]['accession_csv'] = ','.join(merged)
-                                # Keep the accumulated DECLARED copies (from TOTAL BOOK column)
-                                # as authoritative. Only use len(merged) if it is larger,
-                                # which would mean the accession list actually contains all
-                                # individual copy IDs (not just range markers).
-                                # CRITICAL: do NOT override accumulated declared copies with
-                                # len(merged) — that throws away the correct total!
                                 acc_count = len(merged)
                                 books_map[key]['copies'] = max(books_map[key]['copies'], acc_count)
+                            # Inherit missing fields from other sheets if not present in the first sheet
+                            if not books_map[key].get('book_id') and book.get('book_id'):
+                                books_map[key]['book_id'] = book.get('book_id')
+                            if (not books_map[key].get('price') or books_map[key].get('price') == 0.0) and book.get('price'):
+                                books_map[key]['price'] = book.get('price')
+                            if not books_map[key].get('publisher') and book.get('publisher'):
+                                books_map[key]['publisher'] = book.get('publisher')
                         else:
                             books_map[key] = dict(book)
 
@@ -11950,7 +11949,7 @@ Note: This is an automated email. Please find the attached formal overdue letter
                         (book_id_v, title_val, author_val, publisher, 'Technology', copies_val, copies_val, accession_csv or None, price_val)
                     )
                     used_accessions.update(_parse_acc_csv(accession_csv))
-                    existing_by_key[key] = (book_id_v, copies_val, copies_val, accession_csv)
+                    existing_by_key[db_key] = (book_id_v, copies_val, copies_val, accession_csv)
                     success_count += 1
 
                 except Exception as e:

@@ -44,6 +44,7 @@ walkthrough.md.resolved
 *.resolved
 
 # Root scratch, audit, and one-off debug scripts
+/*.py
 check_*.py
 inspect_excel*.py
 audit_*.py

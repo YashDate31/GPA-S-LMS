@@ -440,10 +440,16 @@ class SyncManager:
                         results['records_synced'] += records
                     
                     if direction in ['remote_to_local', 'both']:
-                        records = self._sync_table_remote_to_local(
-                            local_conn, remote_conn, table
-                        )
-                        results['records_synced'] += records
+                        # Books are authored exclusively on Desktop Admin.
+                        # Never pull books during bidirectional sync ('both') to prevent
+                        # cloud orphan or mismatched records from reinjecting and inflating local book count.
+                        if table == 'books' and direction != 'remote_to_local':
+                            pass
+                        else:
+                            records = self._sync_table_remote_to_local(
+                                local_conn, remote_conn, table
+                            )
+                            results['records_synced'] += records
                     
                     results['tables_synced'].append(table)
                     
@@ -967,6 +973,22 @@ class SyncManager:
                                 key_vals
                             )
                         exists = local_cursor.fetchone()
+
+                        # For books specifically, also check by (title, author) if book_id didn't match directly.
+                        # This ensures differing book_id formats/prefixes never create duplicate book entries.
+                        if not exists and table_name == 'books':
+                            r_title = row_dict.get('title')
+                            r_author = row_dict.get('author')
+                            if r_title:
+                                local_cursor.execute(
+                                    "SELECT book_id FROM books WHERE LOWER(TRIM(title)) = LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(author, ''))) = LOWER(TRIM(?)) LIMIT 1",
+                                    (str(r_title), str(r_author or ''))
+                                )
+                                exists_by_ta = local_cursor.fetchone()
+                                if exists_by_ta:
+                                    exists = exists_by_ta
+                                    where_clause = "book_id = ?"
+                                    key_vals = [exists_by_ta[0]]
 
                         if exists:
                             # Conflict guard: never overwrite a newer local row with an older cloud row.
